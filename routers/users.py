@@ -49,15 +49,26 @@ async def create_or_update_profile(
 
     # --- 关键修改点结束 ---
 
-@router.get("/profile/me", response_model=ProfileResponse)
-async def get_my_profile(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+@router.get("/me", response_model=ProfileResponse)
+async def get_my_profile(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    # 1. 从数据库查出 profile 对象
     result = await db.execute(select(UserProfile).where(UserProfile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
+    
     if not profile:
-        raise HTTPException(status_code=404, detail="请先完善个人资料")
-    resp = ProfileResponse.model_validate(profile)
-    resp.special_skills = str_to_skills(profile.special_skills or "")
-    return resp
+        # 如果没填过，返回 404 是正常的，前端会引导去填写
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # 2. 【核心修复】手动把数据库对象转为符合 Response 模型的字典
+    # 这里的 str_to_skills 就是你之前定义的那个函数
+    profile_data = {column.name: getattr(profile, column.name) for column in profile.__table__.columns}
+    profile_data["special_skills"] = str_to_skills(profile.special_skills or "")
+    
+    # 3. 返回处理后的数据
+    return profile_data
 
 @router.get("/profile/{user_id}", response_model=ProfileResponse)
 async def get_user_profile(user_id: str, db: AsyncSession = Depends(get_db)):
