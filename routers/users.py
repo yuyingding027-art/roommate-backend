@@ -49,7 +49,7 @@ async def create_or_update_profile(
 
     # --- 关键修改点结束 ---
 
-@router.get("/me", response_model=ProfileResponse)
+@router.get("/profile/me", response_model=ProfileResponse)
 async def get_my_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
