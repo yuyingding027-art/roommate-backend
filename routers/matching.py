@@ -126,6 +126,10 @@ async def _build_match_results(cached_scores, db):
         profile = r.scalar_one_or_none()
         if not profile:
             continue
+        
+        # 使用统一的 str_to_skills 处理逻辑
+        skills_list = str_to_skills(profile.special_skills or "")
+        
         results.append(MatchResult(
             user_id=profile.user_id,
             name=profile.name,
@@ -140,7 +144,7 @@ async def _build_match_results(cached_scores, db):
             budget_min=profile.budget_min,
             budget_max=profile.budget_max,
             roommate_experience=profile.roommate_experience,
-            special_skills=profile.special_skills.split(",") if profile.special_skills else [],
+            special_skills=skills_list,  # 确保这里是 list
             bio=profile.bio,
             avatar_url=profile.avatar_url,
             rule_score=round(ms.rule_score, 1),
