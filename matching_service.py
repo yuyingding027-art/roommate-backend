@@ -1,51 +1,17 @@
 """
 匹配核心逻辑：
 1. rule_score (权重40%)  —— 硬条件：学校/城市/性别/作息/饮食/预算重叠
-2. ai_score (权重40%)    —— Claude分析两人bio/兴趣是否契合
-3. personality_score (权重20%) —— Claude判断MBTI+星座组合兼容性
+2. ai_score (权重40%)    —— Gemini分析两人bio/兴趣是否契合
+3. personality_score (权重20%) —— Gemini综合判断MBTI+星座组合整体兼容性
 """
 import os
 import json
-#import anthropic
+import asyncio
 import google.generativeai as genai
 from database import UserProfile
 
-#client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-MBTI_COMPATIBILITY = {
-    "INTJ": ["ENFP", "ENTP", "INTJ", "INFJ"],
-    "INTP": ["ENTJ", "ENFJ", "INTP", "INFP"],
-    "ENTJ": ["INTP", "INFP", "ENTJ", "INTJ"],
-    "ENTP": ["INTJ", "INFJ", "ENTP", "INTP"],
-    "INFJ": ["ENTP", "ENFP", "INFJ", "INTJ"],
-    "INFP": ["ENTJ", "ENFJ", "INFP", "INTP"],
-    "ENFJ": ["INTP", "INFP", "ENFJ", "INFJ"],
-    "ENFP": ["INTJ", "INFJ", "ENFP", "INFJ"],
-    "ISTJ": ["ESFP", "ESTP", "ISTJ", "ISFJ"],
-    "ISFJ": ["ESFP", "ESTP", "ISFJ", "ISTJ"],
-    "ESTJ": ["ISFP", "ISTP", "ESTJ", "ESFJ"],
-    "ESFJ": ["ISFP", "ISTP", "ESFJ", "ESTJ"],
-    "ISTP": ["ESFJ", "ESTJ", "ISTP", "ISFP"],
-    "ISFP": ["ESTJ", "ESFJ", "ISFP", "ISTP"],
-    "ESTP": ["ISFJ", "ISTJ", "ESTP", "ESFP"],
-    "ESFP": ["ISFJ", "ISTJ", "ESFP", "ESTP"],
-}
-
-ZODIAC_COMPATIBILITY = {
-    "白羊座": ["狮子座", "射手座", "双子座", "水瓶座"],
-    "金牛座": ["处女座", "摩羯座", "巨蟹座", "双鱼座"],
-    "双子座": ["天秤座", "水瓶座", "白羊座", "狮子座"],
-    "巨蟹座": ["天蝎座", "双鱼座", "金牛座", "处女座"],
-    "狮子座": ["白羊座", "射手座", "双子座", "天秤座"],
-    "处女座": ["金牛座", "摩羯座", "巨蟹座", "天蝎座"],
-    "天秤座": ["双子座", "水瓶座", "狮子座", "射手座"],
-    "天蝎座": ["巨蟹座", "双鱼座", "处女座", "摩羯座"],
-    "射手座": ["白羊座", "狮子座", "天秤座", "水瓶座"],
-    "摩羯座": ["金牛座", "处女座", "天蝎座", "双鱼座"],
-    "水瓶座": ["双子座", "天秤座", "白羊座", "射手座"],
-    "双鱼座": ["巨蟹座", "天蝎座", "金牛座", "摩羯座"],
-}
 
 def compute_rule_score(me: UserProfile, other: UserProfile) -> float:
     """纯规则匹配，返回0-100"""
@@ -83,30 +49,43 @@ def compute_rule_score(me: UserProfile, other: UserProfile) -> float:
 
     return min(score, 100.0)
 
-def compute_personality_score(me: UserProfile, other: UserProfile) -> float:
-    """MBTI + 星座静态兼容表，返回0-100"""
-    score = 50.0  # 默认中等
 
-    mbti_bonus = 0
-    if me.mbti and other.mbti:
-        compatible_list = MBTI_COMPATIBILITY.get(me.mbti.upper(), [])
-        if other.mbti.upper() in compatible_list:
-            mbti_bonus = 25
-        elif me.mbti.upper() == other.mbti.upper():
-            mbti_bonus = 15
+async def compute_personality_score(me: UserProfile, other: UserProfile) -> float:
+    """
+    用 Gemini 综合判断 MBTI + 星座整体兼容性，返回0-100。
+    不再分别打分相加，而是让 AI 作为一个整体来权衡。
+    例如：MBTI 很匹配但星座冲突明显，整体分数会被拉低，反之亦然。
+    """
+    if not me.mbti or not other.mbti or not me.zodiac or not other.zodiac:
+        return 50.0
 
-    zodiac_bonus = 0
-    if me.zodiac and other.zodiac:
-        compatible_list = ZODIAC_COMPATIBILITY.get(me.zodiac, [])
-        if other.zodiac in compatible_list:
-            zodiac_bonus = 25
-        elif me.zodiac == other.zodiac:
-            zodiac_bonus = 10
+    prompt = f"""你是一个舍友兼容性专家。请综合判断以下两人的性格组合作为室友的整体兼容性。
 
-    score = 50 + mbti_bonus + zodiac_bonus
-    return min(score, 100.0)
+人物A：MBTI={me.mbti}，星座={me.zodiac}
+人物B：MBTI={other.mbti}，星座={other.zodiac}
+
+重要原则：
+- 请将 MBTI 和星座作为一个整体来判断，不要分别打分再相加。
+- 如果 MBTI 很匹配但星座组合有明显冲突，整体分数应该被拉低。
+- 如果星座很匹配但 MBTI 组合容易产生摩擦，整体分数也应该被拉低。
+- 只有 MBTI 和星座都相对兼容时，才给高分。
+- 50分为中等，低于40分表示不建议配对，高于75分表示非常推荐。
+
+只输出JSON：{{"score": 75, "reason": "简要原因（一句话）"}}
+score范围0-100，不要输出任何其他内容。"""
+
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        text = response.text.strip().replace("```json", "").replace("```", "")
+        data = json.loads(text)
+        return float(data.get("score", 50))
+    except Exception:
+        return 50.0
+
 
 async def compute_ai_score(me: UserProfile, other: UserProfile) -> float:
+    """用 Gemini 分析两人 bio 的兴趣和生活方式契合度，返回0-100"""
     if not me.bio or not other.bio:
         return 60.0
 
@@ -128,6 +107,7 @@ score范围0-100。不要输出任何其他内容。"""
         return float(data.get("score", 60))
     except Exception:
         return 60.0
+
 
 def compute_total_score(rule: float, ai: float, personality: float) -> float:
     return rule * 0.4 + ai * 0.4 + personality * 0.2
