@@ -54,21 +54,19 @@ async def get_my_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    # 1. 从数据库查出 profile 对象
     result = await db.execute(select(UserProfile).where(UserProfile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
     
     if not profile:
-        # 如果没填过，返回 404 是正常的，前端会引导去填写
+        # 如果没资料，返回 404 是对的，Lovable 会显示“去填写”
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    # 2. 【核心修复】手动把数据库对象转为符合 Response 模型的字典
-    # 这里的 str_to_skills 就是你之前定义的那个函数
-    profile_data = {column.name: getattr(profile, column.name) for column in profile.__table__.columns}
-    profile_data["special_skills"] = str_to_skills(profile.special_skills or "")
+    # 关键：手动把 SQLAlchemy 对象转成字典，并修正 skills 格式
+    profile_dict = {c.name: getattr(profile, c.name) for c in profile.__table__.columns}
+    profile_dict["special_skills"] = str_to_skills(profile.special_skills or "")
     
-    # 3. 返回处理后的数据
-    return profile_data
+    # 这样返回，前端 Lovable 就能收到正确的 List 数据，从而回显在表单里
+    return profile_dict
 
 @router.get("/profile/{user_id}", response_model=ProfileResponse)
 async def get_user_profile(user_id: str, db: AsyncSession = Depends(get_db)):
