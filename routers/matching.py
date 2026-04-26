@@ -51,8 +51,7 @@ async def get_matches(
 
     async def score_one(other: UserProfile):
         rule = compute_rule_score(my_profile, other)
-        if rule == 0:  # 不同校/城直接跳过
-            return None
+        # 暂时不过滤，让所有用户都显示
         async with semaphore:
             ai = await compute_ai_score(my_profile, other)
         personality = compute_personality_score(my_profile, other)
