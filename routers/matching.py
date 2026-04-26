@@ -29,7 +29,16 @@ async def get_matches(
     if not my_profile:
         raise HTTPException(status_code=400, detail="请先完善个人资料")
 
-    # 如果不强制刷新，先查缓存
+    # 获取所有其他用户profile
+    all_profiles_result = await db.execute(
+        select(UserProfile).where(UserProfile.user_id != current_user.id)
+    )
+    all_profiles = all_profiles_result.scalars().all()
+
+    if not all_profiles:
+        return []
+
+    # 如果不强制刷新，且缓存数量和当前用户数一致，直接用缓存
     if not refresh:
         cached = await db.execute(
             select(MatchScore).where(MatchScore.user_id == current_user.id)
@@ -37,24 +46,17 @@ async def get_matches(
             .limit(limit)
         )
         cached_scores = cached.scalars().all()
-        if cached_scores:
+        if len(cached_scores) == len(all_profiles):
             return await _build_match_results(cached_scores, db)
 
-    # 获取所有其他用户profile
-    all_profiles_result = await db.execute(
-        select(UserProfile).where(UserProfile.user_id != current_user.id)
-    )
-    all_profiles = all_profiles_result.scalars().all()
-
-    # 并发计算AI分（最多同时10个）
+    # 并发计算分数（最多同时10个）
     semaphore = asyncio.Semaphore(10)
 
     async def score_one(other: UserProfile):
         rule = compute_rule_score(my_profile, other)
-        # 暂时不过滤，让所有用户都显示
         async with semaphore:
             ai = await compute_ai_score(my_profile, other)
-        personality = compute_personality_score(my_profile, other)
+            personality = await compute_personality_score(my_profile, other)
         total = compute_total_score(rule, ai, personality)
         return (other, rule, ai, personality, total)
 
@@ -125,10 +127,6 @@ async def _build_match_results(cached_scores, db):
         profile = r.scalar_one_or_none()
         if not profile:
             continue
-        
-        # 使用统一的 str_to_skills 处理逻辑
-        skills_list = str_to_skills(profile.special_skills or "")
-        
         results.append(MatchResult(
             user_id=profile.user_id,
             name=profile.name,
@@ -143,7 +141,7 @@ async def _build_match_results(cached_scores, db):
             budget_min=profile.budget_min,
             budget_max=profile.budget_max,
             roommate_experience=profile.roommate_experience,
-            special_skills=skills_list,  # 确保这里是 list
+            special_skills=str_to_skills(profile.special_skills or ""),
             bio=profile.bio,
             avatar_url=profile.avatar_url,
             rule_score=round(ms.rule_score, 1),
