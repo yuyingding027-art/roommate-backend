@@ -1,6 +1,6 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
 
@@ -16,10 +16,11 @@ app = FastAPI(title="留学生找舍友平台 API", version="1.0.0", lifespan=li
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境改为你的Lovable域名
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # 改为False，与allow_origins=["*"]兼容
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
