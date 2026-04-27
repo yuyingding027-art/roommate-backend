@@ -51,23 +51,42 @@ class UserProfile(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False)
 
+    # 基本信息
     name = Column(String(100), nullable=False)
     gender = Column(String(10), nullable=False)
-    school = Column(String(200), nullable=False)
+    nationality = Column(String(100), nullable=True)      # 国籍
+    study_country = Column(String(100), nullable=True)    # 留学国家
+    study_state = Column(String(100), nullable=True)      # 州/省
     city = Column(String(100), nullable=False)
+    native_language = Column(String(50), nullable=True)   # 母语
+    school = Column(String(200), nullable=False)
+    degree = Column(String(20), nullable=True)            # bachelor/master/phd
+    major = Column(String(100), nullable=True)            # 专业
     avatar_url = Column(String(500), nullable=True)
 
+    # 性格标签
     zodiac = Column(String(20), nullable=True)
     mbti = Column(String(10), nullable=True)
 
+    # 生活习惯
     sleep_habit = Column(String(20), nullable=False)
     diet_habit = Column(String(20), nullable=False)
     food_preference = Column(String(50), nullable=True)
+    habits = Column(String(500), nullable=True)           # 逗号分隔：smoking,no_smoking,pet,no_pet,car,no_car,clean_high,clean_mid,clean_low
 
-    budget_min = Column(Integer, nullable=False)
-    budget_max = Column(Integer, nullable=False)
+    # 租房
+    budget_currency = Column(String(10), nullable=True)   # USD/CNY/GBP/JPY等
+    budget_max = Column(Integer, nullable=True)           # 只保留最高预算
+    budget_min = Column(Integer, nullable=True)           # 保留兼容性
+    room_types = Column(String(100), nullable=True)       # 逗号分隔：2b1b,2b2b,3b2b,homestay
+
+    # 经历
     roommate_experience = Column(Integer, default=0)
+
+    # 特殊技能
     special_skills = Column(String(200), nullable=True)
+
+    # 自我介绍
     bio = Column(Text, nullable=True)
     profile_summary = Column(Text, nullable=True)
 
@@ -85,6 +104,7 @@ class MatchScore(Base):
     ai_score = Column(Float, default=0.0)
     personality_score = Column(Float, default=0.0)
     total_score = Column(Float, default=0.0)
+    match_reason = Column(Text, nullable=True)            # AI生成的匹配原因
     computed_at = Column(DateTime, default=datetime.utcnow)
 
 class Message(Base):
