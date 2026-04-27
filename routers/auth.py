@@ -64,9 +64,8 @@ async def send_verification_code(body: SendCodeRequest, db: AsyncSession = Depen
                 <p>验证码5分钟内有效，请勿泄露给他人。</p>
             """
         })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="验证码发送失败，请稍后重试")
-
+   except Exception as e:
+        raise HTTPException(status_code=500, detail=f"验证码发送失败：{str(e)}")
     return {"message": "验证码已发送，请查收邮件"}
 
 
