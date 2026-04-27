@@ -59,10 +59,10 @@ async def send_verification_code(body: SendCodeRequest, db: AsyncSession = Depen
                     "to": [{"email": body.email}],
                     "subject": "UniRoomi 验证码",
                     "htmlContent": f"""
-                        <h2>欢迎加入 UniRoomi 觅舍！</h2>
-                        <p>你的验证码是：</p>
-                        <h1 style="letter-spacing:8px; color:#4F46E5;">{code}</h1>
-                        <p>验证码5分钟内有效，请勿泄露给他人。</p>
+                         <h2>Welcome to UniRoomi!</h2>
+                         <p>Your verification code is:</p>
+                         <h1 style="letter-spacing:8px; color:#4F46E5;">{code}</h1>
+                         <p>This code expires in 5 minutes. Do not share it with anyone.</p>
                     """
                 }
             )
