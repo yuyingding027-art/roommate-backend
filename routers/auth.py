@@ -4,15 +4,14 @@ from sqlalchemy import select
 from database import get_db, User, EmailVerification
 from schemas import RegisterRequest, LoginResponse, SendCodeRequest, VerifyCodeRequest
 from auth_utils import hash_password, verify_password, create_access_token
-import resend
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 import os
 import random
 import string
 from datetime import datetime, timedelta
 
 router = APIRouter()
-
-resend.api_key = os.getenv("RESEND_API_KEY")
 
 ALLOWED_DOMAINS = [".edu", ".ac.", ".hku.hk"]
 
@@ -29,16 +28,13 @@ async def send_verification_code(body: SendCodeRequest, db: AsyncSession = Depen
     if not is_edu_email(body.email):
         raise HTTPException(status_code=400, detail="仅支持教育机构邮箱（.edu / .ac / .hku）")
 
-    # 检查是否已注册
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="该邮箱已注册")
 
-    # 生成验证码，5分钟有效
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=5)
 
-    # 存入数据库（覆盖旧的）
     existing = await db.execute(
         select(EmailVerification).where(EmailVerification.email == body.email)
     )
@@ -51,22 +47,23 @@ async def send_verification_code(body: SendCodeRequest, db: AsyncSession = Depen
         db.add(ev)
     await db.commit()
 
-    # 发送邮件
     try:
-        resend.Emails.send({
-            "from": "UniRoomi <noreply@univoroomi.com>",  # 改成你的域名
-            "to": body.email,
-            "subject": "UniRoomi 验证码",
-            "html": f"""
+        message = Mail(
+            from_email="noreply@univoroomi.com",
+            to_emails=body.email,
+            subject="UniRoomi 验证码",
+            html_content=f"""
                 <h2>欢迎加入 UniRoomi 觅舍！</h2>
                 <p>你的验证码是：</p>
                 <h1 style="letter-spacing:8px; color:#4F46E5;">{code}</h1>
                 <p>验证码5分钟内有效，请勿泄露给他人。</p>
             """
-        })
+        )
+        sg = SendGridAPIClient(os.getenv("SENDGRID_API_KEY"))
+        sg.send(message)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"验证码发送失败：{str(e)}")
-   
+
     return {"message": "验证码已发送，请查收邮件"}
 
 
@@ -75,7 +72,6 @@ async def register(body: VerifyCodeRequest, db: AsyncSession = Depends(get_db)):
     if not is_edu_email(body.email):
         raise HTTPException(status_code=400, detail="仅支持教育机构邮箱（.edu / .ac / .hku）")
 
-    # 验证码校验
     result = await db.execute(
         select(EmailVerification).where(EmailVerification.email == body.email)
     )
@@ -85,12 +81,10 @@ async def register(body: VerifyCodeRequest, db: AsyncSession = Depends(get_db)):
     if ev.expires_at < datetime.utcnow():
         raise HTTPException(status_code=400, detail="验证码已过期，请重新获取")
 
-    # 检查是否已注册
     existing = await db.execute(select(User).where(User.email == body.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="该邮箱已注册")
 
-    # 创建用户
     user = User(email=body.email, hashed_password=hash_password(body.password))
     db.add(user)
     await db.commit()
