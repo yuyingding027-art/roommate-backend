@@ -9,9 +9,16 @@ router = APIRouter()
 
 @router.post("/register", response_model=LoginResponse)
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    # 检查邮箱域名
+    email_lower = body.email.lower()
+    allowed = any(ext in email_lower for ext in [".edu", ".ac.", ".hku.hk"])
+    if not allowed:
+        raise HTTPException(status_code=400, detail="仅支持教育机构邮箱注册（.edu / .ac / .hku）")
+    
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="该邮箱已注册")
+    # 后面不变...
 
     user = User(email=body.email, hashed_password=hash_password(body.password))
     db.add(user)
