@@ -54,7 +54,7 @@ async def send_verification_code(body: SendCodeRequest, db: AsyncSession = Depen
     # 发送邮件
     try:
         resend.Emails.send({
-            "from": "UniRoomi <onboarding@resend.dev>",  # 改成你的域名
+            "from": "UniRoomi <noreply@univoroomi.com>",  # 改成你的域名
             "to": body.email,
             "subject": "UniRoomi 验证码",
             "html": f"""
