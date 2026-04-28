@@ -97,15 +97,28 @@ class UserProfile(Base):
 class MatchScore(Base):
     __tablename__ = "match_scores"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    target_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    rule_score = Column(Float, default=0.0)
-    ai_score = Column(Float, default=0.0)
+    id               = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id          = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    target_user_id   = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+    # ── 旧字段（保留兼容）──────────────────────────────────
+    rule_score        = Column(Float, default=0.0)
+    ai_score          = Column(Float, default=0.0)
     personality_score = Column(Float, default=0.0)
-    total_score = Column(Float, default=0.0)
-    match_reason = Column(Text, nullable=True)            # AI生成的匹配原因
-    computed_at = Column(DateTime, default=datetime.utcnow)
+    total_score       = Column(Float, default=0.0)
+    match_reason      = Column(Text, nullable=True)
+
+    # ── 新增：5维度独立分数 ────────────────────────────────
+    habits_score      = Column(Float, default=0.0)   # 生活习惯 25%
+    objective_score   = Column(Float, default=0.0)   # 客观信息 25%
+    skills_score      = Column(Float, default=0.0)   # 技能     20%
+    interest_score    = Column(Float, default=0.0)   # 兴趣爱好 15%
+    # personality_score 复用旧字段（性格 15%）
+
+    # ── 实际使用权重（JSON字符串）─────────────────────────
+    score_weights     = Column(Text, nullable=True)
+
+    computed_at       = Column(DateTime, default=datetime.utcnow)
 
 class Message(Base):
     __tablename__ = "messages"
