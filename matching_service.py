@@ -5,8 +5,8 @@
   1. habits_score      生活习惯  25%  —— 纯规则
   2. objective_score   客观信息  25%  —— 纯规则
   3. skills_score      技能      20%  —— 纯规则
-  4. personality_score 性格      15%  —— Gemini (MBTI + 星座)
-  5. interest_score    兴趣爱好  15%  —— Gemini (bio)
+  4. personality_score 性格      15%  —— Qwen (MBTI + 星座)
+  5. interest_score    兴趣爱好  15%  —— Qwen (bio)
 
 缺失规则：
   - 某维度数据为空 → 该维度权重降为 5%（最低保底）
@@ -32,11 +32,11 @@ skills_score (0-100, 纯规则)
   共同技能: 每个 +20，最高 100
   无技能数据 → 返回 None，触发降权
 
-personality_score (0-100, Gemini)
+personality_score (0-100, Qwen)
   MBTI + 星座综合判断
   任一缺失 → 返回 None，触发降权
 
-interest_score (0-100, Gemini)
+interest_score (0-100, Qwen)
   bio 兴趣分析
   两人都无 bio → 返回 None，触发降权
 ══════════════════════════════════════════════════════════
@@ -45,10 +45,14 @@ interest_score (0-100, Gemini)
 import os
 import json
 import asyncio
-import google.generativeai as genai
+from openai import OpenAI
 from database import UserProfile
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# ── Qwen 客户端（阿里云国际版，香港节点）────────────────────────────────────
+qwen_client = OpenAI(
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+)
 
 # ── 默认权重 ──────────────────────────────────────────────
 DEFAULT_WEIGHTS = {
@@ -174,7 +178,7 @@ def compute_skills_score(me: UserProfile, other: UserProfile) -> float | None:
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 4：性格（Gemini）
+# 维度 4：性格（Qwen）
 # ══════════════════════════════════════════════════════════
 async def compute_personality_score(
     me: UserProfile, other: UserProfile
@@ -195,17 +199,22 @@ async def compute_personality_score(
         "score范围0-100，不输出任何其他内容。"
     )
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        resp  = await asyncio.to_thread(model.generate_content, prompt)
-        text  = resp.text.strip().replace("```json", "").replace("```", "")
-        data  = json.loads(text)
+        resp = await asyncio.to_thread(
+            lambda: qwen_client.chat.completions.create(
+                model="qwen-plus",
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "")
+        data = json.loads(text)
         return float(data.get("score", 50)), data.get("reason")
-    except Exception:
+    except Exception as e:
+        print(f"Qwen personality API 调用失败: {e}")
         return 50.0, None
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 5：兴趣爱好（Gemini）
+# 维度 5：兴趣爱好（Qwen）
 # ══════════════════════════════════════════════════════════
 async def compute_interest_score(
     me: UserProfile, other: UserProfile, search_query: str = None
@@ -227,17 +236,22 @@ async def compute_interest_score(
         "score范围0-100，不输出其他内容。"
     )
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        resp  = await asyncio.to_thread(model.generate_content, prompt)
-        text  = resp.text.strip().replace("```json", "").replace("```", "")
-        data  = json.loads(text)
-        pts   = data.get("match", [])
-        rsn   = data.get("reason", "")
-        full  = ""
+        resp = await asyncio.to_thread(
+            lambda: qwen_client.chat.completions.create(
+                model="qwen-plus",
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "")
+        data = json.loads(text)
+        pts  = data.get("match", [])
+        rsn  = data.get("reason", "")
+        full = ""
         if pts: full += "🎯 共同点：" + "、".join(pts)
         if rsn: full += ("\n" if full else "") + "💡 " + rsn
         return float(data.get("score", 60)), full.strip() or None
-    except Exception:
+    except Exception as e:
+        print(f"Qwen interest API 调用失败: {e}")
         return 60.0, None
 
 
@@ -249,10 +263,6 @@ def resolve_weights(
     personality_score: float | None,
     interest_score:    float | None,
 ) -> dict[str, float]:
-    """
-    根据哪些维度有数据，计算实际使用的权重。
-    缺失的维度保底 MIN_WEIGHT=5%，剩余按默认比例等比扩大。
-    """
     missing = []
     if skills_score      is None: missing.append("skills")
     if personality_score is None: missing.append("personality")
@@ -261,10 +271,9 @@ def resolve_weights(
     if not missing:
         return dict(DEFAULT_WEIGHTS)
 
-    # 缺失维度各占 MIN_WEIGHT
-    reserved = MIN_WEIGHT * len(missing)
-    pool     = 1.0 - reserved
-    present  = {k: v for k, v in DEFAULT_WEIGHTS.items() if k not in missing}
+    reserved    = MIN_WEIGHT * len(missing)
+    pool        = 1.0 - reserved
+    present     = {k: v for k, v in DEFAULT_WEIGHTS.items() if k not in missing}
     present_sum = sum(present.values())
 
     weights = {k: v / present_sum * pool for k, v in present.items()}
@@ -280,10 +289,6 @@ def compute_total_score(
     personality_score: float | None,
     interest_score:    float | None,
 ) -> tuple[float, dict[str, float]]:
-    """
-    返回 (total_0_100, weights_dict)。
-    weights_dict 供前端展示实际各维度权重百分比。
-    """
     w = resolve_weights(skills_score, personality_score, interest_score)
 
     s_skills      = skills_score      if skills_score      is not None else 50.0
@@ -300,7 +305,7 @@ def compute_total_score(
     return round(min(total, 100.0), 1), w
 
 
-# ── 旧接口兼容（如果其他地方还调用了旧函数名）──────────────────
+# ── 旧接口兼容 ──────────────────────────────────────────────
 def compute_rule_score(me, other, priorities=None):
     return compute_habits_score(me, other)
 
