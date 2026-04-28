@@ -24,7 +24,7 @@ def str_to_list(s: str) -> list:
     return [x for x in s.split(",") if x] if s else []
 
 
-# ─── 强筛选关键词映射（保留上一版逻辑）────────────────────────────────────────
+# ─── 强筛选关键词映射 ────────────────────────────────────────────────────────
 GENDER_MAP = {
     "女": ["女", "female", "f"], "女性": ["女", "female", "f"], "女生": ["女", "female", "f"],
     "男": ["男", "male", "m"],   "男性": ["男", "male", "m"],   "男生": ["男", "male", "m"],
@@ -124,6 +124,11 @@ async def get_matches(
     if not all_profiles:
         return []
 
+    # ── 查出所有候选人的 email（一次批量查询）──────────────────────────────
+    user_ids = [p.user_id for p in all_profiles]
+    users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+    email_map: dict = {u.id: u.email for u in users_result.scalars().all()}
+
     # 强筛选
     hard_filters = parse_hard_filters(search_query or "")
     soft_query   = hard_filters.pop("soft_query", None) or search_query
@@ -134,7 +139,7 @@ async def get_matches(
     if search_query or priorities:
         refresh = True
 
-    # 缓存命中（无搜索词且无硬筛选时）
+    # 缓存命中
     if not refresh and not hard_filters:
         cached = await db.execute(
             select(MatchScore)
@@ -144,7 +149,7 @@ async def get_matches(
         )
         cached_scores = cached.scalars().all()
         if len(cached_scores) == len(all_profiles):
-            return await _build_match_results(cached_scores, db)
+            return await _build_match_results(cached_scores, db, email_map)
 
     semaphore = asyncio.Semaphore(10)
 
@@ -191,7 +196,6 @@ async def get_matches(
             ms.personality_score = p_score
             ms.total_score       = total
             ms.match_reason      = match_reason
-            # 新字段
             if hasattr(ms, "habits_score"):    ms.habits_score    = habits
             if hasattr(ms, "objective_score"): ms.objective_score = objective
             if hasattr(ms, "skills_score"):    ms.skills_score    = s_score
@@ -199,13 +203,13 @@ async def get_matches(
             if hasattr(ms, "score_weights"):   ms.score_weights   = json.dumps(weights)
         else:
             kwargs = dict(
-                user_id          = current_user.id,
-                target_user_id   = other.user_id,
-                rule_score       = habits,
-                ai_score         = i_score,
-                personality_score= p_score,
-                total_score      = total,
-                match_reason     = match_reason,
+                user_id           = current_user.id,
+                target_user_id    = other.user_id,
+                rule_score        = habits,
+                ai_score          = i_score,
+                personality_score = p_score,
+                total_score       = total,
+                match_reason      = match_reason,
             )
             if hasattr(MatchScore, "habits_score"):    kwargs["habits_score"]    = habits
             if hasattr(MatchScore, "objective_score"): kwargs["objective_score"] = objective
@@ -224,47 +228,48 @@ async def get_matches(
         i_score = interest    if interest    is not None else 50.0
         s_score = skills      if skills      is not None else 0.0
         match_results.append(MatchResult(
-            user_id          = other.user_id,
-            name             = other.name,
-            school           = other.school,
-            city             = other.city,
-            study_country    = other.study_country,
-            study_state      = other.study_state,
-            native_language  = other.native_language,
-            degree           = other.degree,
-            major            = other.major,
-            gender           = other.gender,
-            zodiac           = other.zodiac,
-            mbti             = other.mbti,
-            sleep_habit      = other.sleep_habit,
-            diet_habit       = other.diet_habit,
-            food_preference  = other.food_preference,
-            habits           = str_to_list(other.habits or ""),
-            budget_currency  = other.budget_currency,
-            budget_min       = other.budget_min,
-            budget_max       = other.budget_max,
-            room_types       = str_to_list(other.room_types or ""),
+            user_id             = other.user_id,
+            name                = other.name,
+            school              = other.school,
+            city                = other.city,
+            study_country       = other.study_country,
+            study_state         = other.study_state,
+            native_language     = other.native_language,
+            degree              = other.degree,
+            major               = other.major,
+            gender              = other.gender,
+            zodiac              = other.zodiac,
+            mbti                = other.mbti,
+            sleep_habit         = other.sleep_habit,
+            diet_habit          = other.diet_habit,
+            food_preference     = other.food_preference,
+            habits              = str_to_list(other.habits or ""),
+            budget_currency     = other.budget_currency,
+            budget_min          = other.budget_min,
+            budget_max          = other.budget_max,
+            room_types          = str_to_list(other.room_types or ""),
             roommate_experience = other.roommate_experience,
-            special_skills   = str_to_list(other.special_skills or ""),
-            bio              = other.bio,
-            avatar_url       = other.avatar_url,
-            # 旧字段兼容
-            rule_score       = round(habits),
-            ai_score         = round(i_score),
-            personality_score= round(p_score),
-            total_score      = round(total),
-            # 新字段
-            habits_score     = round(habits),
-            objective_score  = round(objective),
-            skills_score     = round(s_score),
-            interest_score   = round(i_score),
-            score_weights    = weights,
-            match_reason     = match_reason,
+            special_skills      = str_to_list(other.special_skills or ""),
+            bio                 = other.bio,
+            avatar_url          = other.avatar_url,
+            email               = email_map.get(other.user_id),   # ← 新增
+            rule_score          = round(habits),
+            ai_score            = round(i_score),
+            personality_score   = round(p_score),
+            total_score         = round(total),
+            habits_score        = round(habits),
+            objective_score     = round(objective),
+            skills_score        = round(s_score),
+            interest_score      = round(i_score),
+            score_weights       = weights,
+            match_reason        = match_reason,
         ))
     return match_results
 
 
-async def _build_match_results(cached_scores, db):
+async def _build_match_results(cached_scores, db, email_map: dict = None):
+    if email_map is None:
+        email_map = {}
     results = []
     for ms in cached_scores:
         r = await db.execute(
@@ -276,8 +281,10 @@ async def _build_match_results(cached_scores, db):
 
         weights = {}
         if hasattr(ms, "score_weights") and ms.score_weights:
-            try: weights = json.loads(ms.score_weights)
-            except Exception: weights = {}
+            try:
+                weights = json.loads(ms.score_weights)
+            except Exception:
+                weights = {}
 
         h_score = getattr(ms, "habits_score",    ms.rule_score)
         o_score = getattr(ms, "objective_score", 0.0)
@@ -285,39 +292,40 @@ async def _build_match_results(cached_scores, db):
         i_score = getattr(ms, "interest_score",  ms.ai_score)
 
         results.append(MatchResult(
-            user_id          = profile.user_id,
-            name             = profile.name,
-            school           = profile.school,
-            city             = profile.city,
-            study_country    = profile.study_country,
-            study_state      = profile.study_state,
-            native_language  = profile.native_language,
-            degree           = profile.degree,
-            major            = profile.major,
-            gender           = profile.gender,
-            zodiac           = profile.zodiac,
-            mbti             = profile.mbti,
-            sleep_habit      = profile.sleep_habit,
-            diet_habit       = profile.diet_habit,
-            food_preference  = profile.food_preference,
-            habits           = str_to_list(profile.habits or ""),
-            budget_currency  = profile.budget_currency,
-            budget_min       = profile.budget_min,
-            budget_max       = profile.budget_max,
-            room_types       = str_to_list(profile.room_types or ""),
+            user_id             = profile.user_id,
+            name                = profile.name,
+            school              = profile.school,
+            city                = profile.city,
+            study_country       = profile.study_country,
+            study_state         = profile.study_state,
+            native_language     = profile.native_language,
+            degree              = profile.degree,
+            major               = profile.major,
+            gender              = profile.gender,
+            zodiac              = profile.zodiac,
+            mbti                = profile.mbti,
+            sleep_habit         = profile.sleep_habit,
+            diet_habit          = profile.diet_habit,
+            food_preference     = profile.food_preference,
+            habits              = str_to_list(profile.habits or ""),
+            budget_currency     = profile.budget_currency,
+            budget_min          = profile.budget_min,
+            budget_max          = profile.budget_max,
+            room_types          = str_to_list(profile.room_types or ""),
             roommate_experience = profile.roommate_experience,
-            special_skills   = str_to_list(profile.special_skills or ""),
-            bio              = profile.bio,
-            avatar_url       = profile.avatar_url,
-            rule_score       = round(ms.rule_score),
-            ai_score         = round(ms.ai_score),
-            personality_score= round(ms.personality_score),
-            total_score      = round(ms.total_score),
-            habits_score     = round(h_score),
-            objective_score  = round(o_score),
-            skills_score     = round(s_score),
-            interest_score   = round(i_score),
-            score_weights    = weights or None,
-            match_reason     = ms.match_reason,
+            special_skills      = str_to_list(profile.special_skills or ""),
+            bio                 = profile.bio,
+            avatar_url          = profile.avatar_url,
+            email               = email_map.get(profile.user_id),  # ← 新增
+            rule_score          = round(ms.rule_score),
+            ai_score            = round(ms.ai_score),
+            personality_score   = round(ms.personality_score),
+            total_score         = round(ms.total_score),
+            habits_score        = round(h_score),
+            objective_score     = round(o_score),
+            skills_score        = round(s_score),
+            interest_score      = round(i_score),
+            score_weights       = weights or None,
+            match_reason        = ms.match_reason,
         ))
     return results
