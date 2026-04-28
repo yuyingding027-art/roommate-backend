@@ -1,10 +1,47 @@
 """
-匹配核心逻辑：
-1. rule_score (动态权重) —— 硬条件：学校/城市/语言/专业/作息/饮食/预算/习惯
-2. ai_score (动态权重)   —— Gemini分析bio契合度 + 搜索词匹配
-3. personality_score (动态权重) —— Gemini综合判断MBTI+星座整体兼容性
-权重依据用户勾选的priorities动态调整
+匹配核心逻辑 v3 — 五维度体系
+══════════════════════════════════════════════════════════
+默认权重（五项数据都完整时）：
+  1. habits_score      生活习惯  25%  —— 纯规则
+  2. objective_score   客观信息  25%  —— 纯规则
+  3. skills_score      技能      20%  —— 纯规则
+  4. personality_score 性格      15%  —— Gemini (MBTI + 星座)
+  5. interest_score    兴趣爱好  15%  —— Gemini (bio)
+
+缺失规则：
+  - 某维度数据为空 → 该维度权重降为 5%（最低保底）
+  - 剩余权重按各维度默认比例等比扩大，补齐到 100%
+
+分数细则
+──────────────────────────────────────────────────────────
+habits_score (0-100, 纯规则)
+  作息完全相同           +40
+  一方弹性               +20
+  饮食完全相同           +25  (含口味偏好 +5)
+  无生活冲突             +35 / 1条冲突 +10 / 2+条冲突 0
+  满分=100，按比例归一化
+
+objective_score (0-100, 纯规则)
+  同校                   +40 (最高权)
+  同校区/study_state     +20
+  同专业                 +25
+  预算差≤20%             +15 / ≤40% +8
+  满分=100，按比例归一化
+
+skills_score (0-100, 纯规则)
+  共同技能: 每个 +20，最高 100
+  无技能数据 → 返回 None，触发降权
+
+personality_score (0-100, Gemini)
+  MBTI + 星座综合判断
+  任一缺失 → 返回 None，触发降权
+
+interest_score (0-100, Gemini)
+  bio 兴趣分析
+  两人都无 bio → 返回 None，触发降权
+══════════════════════════════════════════════════════════
 """
+
 import os
 import json
 import asyncio
@@ -13,188 +50,259 @@ from database import UserProfile
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
+# ── 默认权重 ──────────────────────────────────────────────
+DEFAULT_WEIGHTS = {
+    "habits":      0.25,
+    "objective":   0.25,
+    "skills":      0.20,
+    "personality": 0.15,
+    "interest":    0.15,
+}
+MIN_WEIGHT = 0.05  # 缺失维度的保底权重
+
 
 def str_to_list(s: str) -> list:
     return [x for x in s.split(",") if x] if s else []
 
 
-def compute_rule_score(me: UserProfile, other: UserProfile, priorities: list = None) -> float:
-    """纯规则匹配，返回0-100，依据priorities调整权重"""
-    if priorities is None:
-        priorities = ["city", "school", "major", "language", "habits", "budget", "special_skills"]
-
+# ══════════════════════════════════════════════════════════
+# 维度 1：生活习惯（纯规则）
+# ══════════════════════════════════════════════════════════
+def compute_habits_score(me: UserProfile, other: UserProfile) -> float:
+    """
+    返回 0-100。
+    作息(40) + 饮食(25) + 冲突检测(35) = 满分 100
+    """
     score = 0.0
-    max_score = 0.0
 
-    # 同城（20分）
-    if "city" in priorities:
-        max_score += 20
-        if me.city and other.city and me.city.strip().lower() == other.city.strip().lower():
-            score += 20
-
-    # 同校（20分）
-    if "school" in priorities:
-        max_score += 20
-        if me.school and other.school and me.school.strip().lower() == other.school.strip().lower():
-            score += 20
-
-    # 同专业（10分）
-    if "major" in priorities:
-        max_score += 10
-        if me.major and other.major and me.major.strip().lower() == other.major.strip().lower():
-            score += 10
-
-    # 同语言（10分）
-    if "language" in priorities:
-        max_score += 10
-        if me.native_language and other.native_language and me.native_language == other.native_language:
-            score += 10
-
-    # 作息习惯（15分）
-    if "habits" in priorities:
-        max_score += 15
+    # 作息（满分 40）
+    if me.sleep_habit and other.sleep_habit:
         if me.sleep_habit == other.sleep_habit:
-            score += 15
-        elif "flexible" in [me.sleep_habit, other.sleep_habit]:
-            score += 7
+            score += 40
+        elif "flexible" in (me.sleep_habit, other.sleep_habit):
+            score += 20
 
-    # 饮食习惯（10分）
-    if "habits" in priorities:
-        max_score += 10
+    # 饮食（满分 25）
+    if me.diet_habit and other.diet_habit:
         if me.diet_habit == other.diet_habit:
-            score += 8
-            if me.diet_habit == "together" and me.food_preference == other.food_preference:
-                score += 2
-
-    # 生活习惯冲突检测（15分）
-    if "habits" in priorities:
-        max_score += 15
-        my_habits = set(str_to_list(me.habits or ""))
-        other_habits = set(str_to_list(other.habits or ""))
-        conflicts = 0
-        if "smoking" in my_habits and "no_smoking" in other_habits:
-            conflicts += 1
-        if "no_smoking" in my_habits and "smoking" in other_habits:
-            conflicts += 1
-        if "pet" in my_habits and "no_pet" in other_habits:
-            conflicts += 1
-        if "no_pet" in my_habits and "pet" in other_habits:
-            conflicts += 1
-        my_clean = my_habits & {"clean_high", "clean_mid", "clean_low"}
-        other_clean = other_habits & {"clean_high", "clean_mid", "clean_low"}
-        if my_clean and other_clean and my_clean != other_clean:
-            if ("clean_high" in my_clean and "clean_low" in other_clean) or \
-               ("clean_low" in my_clean and "clean_high" in other_clean):
-                conflicts += 1
-        if conflicts == 0:
-            score += 15
-        elif conflicts == 1:
-            score += 5
-
-    # 预算（15分）
-    if "budget" in priorities:
-        max_score += 15
-        my_max = me.budget_max or 0
-        other_max = other.budget_max or 0
-        if my_max > 0 and other_max > 0:
-            diff_ratio = abs(my_max - other_max) / max(my_max, other_max)
-            if diff_ratio <= 0.2:
-                score += 15
-            elif diff_ratio <= 0.4:
+            score += 20
+            if (me.diet_habit == "together"
+                    and me.food_preference and other.food_preference
+                    and me.food_preference == other.food_preference):
+                score += 5
+        else:
+            casual = {"separate", "flexible", "各自解决"}
+            if me.diet_habit in casual and other.diet_habit in casual:
                 score += 8
 
-    # 特殊技能（10分）
-    if "special_skills" in priorities:
-        max_score += 10
-        my_skills = set(str_to_list(me.special_skills or ""))
-        other_skills = set(str_to_list(other.special_skills or ""))
-        common = my_skills & other_skills
-        score += min(len(common) * 3, 10)
+    # 生活习惯冲突（满分 35）
+    my_h  = set(str_to_list(me.habits or ""))
+    oth_h = set(str_to_list(other.habits or ""))
+    conflicts = 0
+    pairs = [("smoking", "no_smoking"), ("pet", "no_pet")]
+    for a, b in pairs:
+        if (a in my_h and b in oth_h) or (b in my_h and a in oth_h):
+            conflicts += 1
+    my_clean  = my_h  & {"clean_high", "clean_mid", "clean_low"}
+    oth_clean = oth_h & {"clean_high", "clean_mid", "clean_low"}
+    if my_clean and oth_clean and my_clean != oth_clean:
+        if (("clean_high" in my_clean and "clean_low" in oth_clean)
+                or ("clean_low" in my_clean and "clean_high" in oth_clean)):
+            conflicts += 1
+    if conflicts == 0:
+        score += 35
+    elif conflicts == 1:
+        score += 10
 
-    if max_score == 0:
-        return 50.0
-    return min((score / max_score) * 100, 100.0)
+    return min(score, 100.0)
 
 
-async def compute_personality_score(me: UserProfile, other: UserProfile) -> tuple:
-    """Gemini综合判断MBTI+星座整体兼容性，返回(score, reason)"""
+# ══════════════════════════════════════════════════════════
+# 维度 2：客观信息（纯规则）
+# ══════════════════════════════════════════════════════════
+def compute_objective_score(me: UserProfile, other: UserProfile) -> float:
+    """
+    返回 0-100。
+    同校(40) + 同校区(20) + 同专业(25) + 预算(15) = 满分 100
+    """
+    score = 0.0
+
+    # 同校（40）
+    if (me.school and other.school
+            and me.school.strip().lower() == other.school.strip().lower()):
+        score += 40
+
+    # 同校区 / study_state（20）
+    if (me.study_state and other.study_state
+            and me.study_state.strip().lower() == other.study_state.strip().lower()):
+        score += 20
+
+    # 同专业（25）
+    if (me.major and other.major
+            and me.major.strip().lower() == other.major.strip().lower()):
+        score += 25
+
+    # 预算差距（15）
+    my_max  = me.budget_max  or 0
+    oth_max = other.budget_max or 0
+    if my_max > 0 and oth_max > 0:
+        diff = abs(my_max - oth_max) / max(my_max, oth_max)
+        if diff <= 0.20:
+            score += 15
+        elif diff <= 0.40:
+            score += 8
+
+    return min(score, 100.0)
+
+
+# ══════════════════════════════════════════════════════════
+# 维度 3：技能（纯规则）
+# ══════════════════════════════════════════════════════════
+def compute_skills_score(me: UserProfile, other: UserProfile) -> float | None:
+    """
+    返回 0-100，或 None（两人都无技能数据时触发降权）。
+    共同技能每个 +20，上限 100。
+    """
+    my_skills  = set(s.strip().lower() for s in str_to_list(me.special_skills  or ""))
+    oth_skills = set(s.strip().lower() for s in str_to_list(other.special_skills or ""))
+
+    if not my_skills and not oth_skills:
+        return None  # 触发降权
+
+    common = my_skills & oth_skills
+    return min(len(common) * 20, 100.0)
+
+
+# ══════════════════════════════════════════════════════════
+# 维度 4：性格（Gemini）
+# ══════════════════════════════════════════════════════════
+async def compute_personality_score(
+    me: UserProfile, other: UserProfile
+) -> tuple[float | None, str | None]:
+    """
+    返回 (score, reason)。
+    MBTI 或星座缺失时返回 (None, None) → 调用方触发降权。
+    """
     if not me.mbti or not other.mbti or not me.zodiac or not other.zodiac:
-        return 50.0, None
+        return None, None
 
-    prompt = f"""你是一个舍友兼容性专家。请综合判断以下两人的性格组合作为室友的整体兼容性。
-
-人物A：MBTI={me.mbti}，星座={me.zodiac}
-人物B：MBTI={other.mbti}，星座={other.zodiac}
-
-重要原则：
-- 将MBTI和星座作为整体判断，不要分别打分相加
-- MBTI很匹配但星座冲突明显，整体分数应被拉低
-- 只有两者都相对兼容时才给高分
-- 50分为中等，低于40不建议，高于75非常推荐
-
-只输出JSON：{{"score": 75, "reason": "简要原因（一句话）"}}
-score范围0-100，不要输出任何其他内容。"""
-
+    prompt = (
+        "你是一个舍友兼容性专家。请综合判断以下两人的性格作为室友的整体兼容性。\n\n"
+        f"人物A：MBTI={me.mbti}，星座={me.zodiac}\n"
+        f"人物B：MBTI={other.mbti}，星座={other.zodiac}\n\n"
+        "原则：整体判断，不要分别打分相加；50分为中等；低于40不建议；高于75推荐。\n"
+        '只输出JSON：{"score": 75, "reason": "一句话"}\n'
+        "score范围0-100，不输出任何其他内容。"
+    )
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        text = response.text.strip().replace("```json", "").replace("```", "")
-        data = json.loads(text)
+        resp  = await asyncio.to_thread(model.generate_content, prompt)
+        text  = resp.text.strip().replace("```json", "").replace("```", "")
+        data  = json.loads(text)
         return float(data.get("score", 50)), data.get("reason")
     except Exception:
         return 50.0, None
 
 
-async def compute_ai_score(me: UserProfile, other: UserProfile, search_query: str = None, priorities: list = None) -> tuple:
-    """Gemini分析bio契合度，返回(score, reason_str)"""
+# ══════════════════════════════════════════════════════════
+# 维度 5：兴趣爱好（Gemini）
+# ══════════════════════════════════════════════════════════
+async def compute_interest_score(
+    me: UserProfile, other: UserProfile, search_query: str = None
+) -> tuple[float | None, str | None]:
+    """
+    返回 (score, reason)。
+    两人都无 bio 时返回 (None, None) → 调用方触发降权。
+    """
     if not me.bio and not other.bio and not search_query:
-        return 60.0, None
+        return None, None
 
-    search_part = f"\n用户搜索词：{search_query}（请重点评估对方是否符合这个描述）" if search_query else ""
-    priority_part = f"\n用户最看重：{', '.join(priorities)}（请在评估时重点考虑这些维度）" if priorities else ""
-
-    prompt = f"""你是一个留学生舍友匹配专家。请分析以下两位同学作为舍友的兼容性。{search_part}{priority_part}
-
-同学A的介绍：{me.bio or '未填写'}
-同学B的介绍：{other.bio or '未填写'}
-
-请综合评估，列出匹配和不匹配的点。
-只输出JSON：{{"score": 75, "match": ["匹配点1", "匹配点2"], "unmatch": ["不匹配点1"], "reason": "总体原因一句话"}}
-score范围0-100，不要输出任何其他内容。"""
-
+    sq_part = f"\n搜索词补充：{search_query}" if search_query else ""
+    prompt = (
+        f"你是留学生舍友兴趣匹配专家。请分析两位同学在兴趣爱好、个人风格方面的契合度。{sq_part}\n\n"
+        f"A的介绍：{me.bio or '未填写'}\n"
+        f"B的介绍：{other.bio or '未填写'}\n\n"
+        "评估共同话题、生活风格、价值观契合度。\n"
+        '只输出JSON：{"score": 70, "match": ["共同点1"], "reason": "一句话"}\n'
+        "score范围0-100，不输出其他内容。"
+    )
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        text = response.text.strip().replace("```json", "").replace("```", "")
-        data = json.loads(text)
-        match_points = data.get("match", [])
-        unmatch_points = data.get("unmatch", [])
-        reason = data.get("reason", "")
-        full_reason = ""
-        if match_points:
-            full_reason += "✅ 匹配：" + "、".join(match_points) + "\n"
-        if unmatch_points:
-            full_reason += "❌ 不匹配：" + "、".join(unmatch_points) + "\n"
-        if reason:
-            full_reason += "💡 " + reason
-        return float(data.get("score", 60)), full_reason.strip() or None
+        resp  = await asyncio.to_thread(model.generate_content, prompt)
+        text  = resp.text.strip().replace("```json", "").replace("```", "")
+        data  = json.loads(text)
+        pts   = data.get("match", [])
+        rsn   = data.get("reason", "")
+        full  = ""
+        if pts: full += "🎯 共同点：" + "、".join(pts)
+        if rsn: full += ("\n" if full else "") + "💡 " + rsn
+        return float(data.get("score", 60)), full.strip() or None
     except Exception:
         return 60.0, None
 
 
-def compute_total_score(rule: float, ai: float, personality: float, priorities: list = None) -> float:
-    """依据priorities动态调整权重"""
-    if not priorities:
-        return rule * 0.4 + ai * 0.4 + personality * 0.2
+# ══════════════════════════════════════════════════════════
+# 权重计算 + 总分合并
+# ══════════════════════════════════════════════════════════
+def resolve_weights(
+    skills_score:      float | None,
+    personality_score: float | None,
+    interest_score:    float | None,
+) -> dict[str, float]:
+    """
+    根据哪些维度有数据，计算实际使用的权重。
+    缺失的维度保底 MIN_WEIGHT=5%，剩余按默认比例等比扩大。
+    """
+    missing = []
+    if skills_score      is None: missing.append("skills")
+    if personality_score is None: missing.append("personality")
+    if interest_score    is None: missing.append("interest")
 
-    has_personality = any(p in priorities for p in ["mbti", "zodiac"])
-    has_bio = any(p in priorities for p in ["bio", "interests", "special_skills"])
+    if not missing:
+        return dict(DEFAULT_WEIGHTS)
 
-    if has_personality and has_bio:
-        return rule * 0.34 + ai * 0.33 + personality * 0.33
-    elif has_personality:
-        return rule * 0.4 + ai * 0.3 + personality * 0.3
-    elif has_bio:
-        return rule * 0.3 + ai * 0.5 + personality * 0.2
-    else:
-        return rule * 0.4 + ai * 0.4 + personality * 0.2
+    # 缺失维度各占 MIN_WEIGHT
+    reserved = MIN_WEIGHT * len(missing)
+    pool     = 1.0 - reserved
+    present  = {k: v for k, v in DEFAULT_WEIGHTS.items() if k not in missing}
+    present_sum = sum(present.values())
+
+    weights = {k: v / present_sum * pool for k, v in present.items()}
+    for k in missing:
+        weights[k] = MIN_WEIGHT
+    return weights
+
+
+def compute_total_score(
+    habits_score:      float,
+    objective_score:   float,
+    skills_score:      float | None,
+    personality_score: float | None,
+    interest_score:    float | None,
+) -> tuple[float, dict[str, float]]:
+    """
+    返回 (total_0_100, weights_dict)。
+    weights_dict 供前端展示实际各维度权重百分比。
+    """
+    w = resolve_weights(skills_score, personality_score, interest_score)
+
+    s_skills      = skills_score      if skills_score      is not None else 50.0
+    s_personality = personality_score if personality_score is not None else 50.0
+    s_interest    = interest_score    if interest_score    is not None else 50.0
+
+    total = (
+        habits_score    * w["habits"]      +
+        objective_score * w["objective"]   +
+        s_skills        * w["skills"]      +
+        s_personality   * w["personality"] +
+        s_interest      * w["interest"]
+    )
+    return round(min(total, 100.0), 1), w
+
+
+# ── 旧接口兼容（如果其他地方还调用了旧函数名）──────────────────
+def compute_rule_score(me, other, priorities=None):
+    return compute_habits_score(me, other)
+
+async def compute_ai_score(me, other, search_query=None, priorities=None):
+    return await compute_interest_score(me, other, search_query)
