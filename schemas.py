@@ -56,6 +56,7 @@ class ProfileCreate(BaseModel):
 
 class ProfileResponse(ProfileCreate):
     user_id: UUID
+    email: Optional[str] = None          # 注册所用教育邮箱，只读展示
     profile_summary: Optional[str] = None
     updated_at: Optional[datetime] = None
     model_config = {"from_attributes": True}
@@ -86,21 +87,21 @@ class MatchResult(BaseModel):
     special_skills: Optional[List[str]]
     bio: Optional[str]
     avatar_url: Optional[str]
+    email: Optional[str] = None          # 对方的教育邮箱，卡片可选展示
 
-    # ── 旧字段（保留兼容，前端旧代码不会报错）──
+    # ── 旧字段（保留兼容）──
     rule_score:        float = 0.0
     ai_score:          float = 0.0
     personality_score: float = 0.0
     total_score:       float = 0.0
 
-    # ── 新增：5维度独立分数（0-100）──
-    habits_score:      float = 0.0   # 生活习惯
-    objective_score:   float = 0.0   # 客观信息
-    skills_score:      float = 0.0   # 技能
-    interest_score:    float = 0.0   # 兴趣爱好
-    # personality_score 复用旧字段，不重复
+    # ── 5维度独立分数 ──
+    habits_score:      float = 0.0
+    objective_score:   float = 0.0
+    skills_score:      float = 0.0
+    interest_score:    float = 0.0
 
-    # ── 新增：实际使用的权重（0-1小数，供前端展示）──
+    # ── 实际权重 ──
     score_weights: Optional[Dict[str, float]] = None
 
     match_reason: Optional[str] = None
