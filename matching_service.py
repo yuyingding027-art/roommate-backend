@@ -51,7 +51,7 @@ from database import UserProfile
 # ── Qwen 客户端（阿里云国际版，香港节点）────────────────────────────────────
 qwen_client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",  # ← 改这里
 )
 
 # ── 默认权重 ──────────────────────────────────────────────
