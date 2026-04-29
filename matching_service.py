@@ -235,6 +235,7 @@ async def compute_interest_score(
         '只输出JSON：{"score": 70, "match": ["共同点1"], "reason": "一句话"}\n'
         "score范围0-100，不输出其他内容。"
     )
+    data = {}  # ← 加这行
     try:
         resp = await asyncio.to_thread(
             lambda: qwen_client.chat.completions.create(
