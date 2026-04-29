@@ -242,6 +242,7 @@ async def compute_interest_score(
                 messages=[{"role": "user", "content": prompt}],
             )
         )
+        print(f"✅ Qwen interest 调用成功，score={data.get('score')}")  # 加这行
         text = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "")
         data = json.loads(text)
         pts  = data.get("match", [])
