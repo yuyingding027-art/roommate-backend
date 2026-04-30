@@ -1,44 +1,16 @@
 """
-匹配核心逻辑 v3 — 五维度体系
+匹配核心逻辑 v4 — 三维度体系
 ══════════════════════════════════════════════════════════
-默认权重（五项数据都完整时）：
-  1. habits_score      生活习惯  25%  —— 纯规则
-  2. objective_score   客观信息  25%  —— 纯规则
-  3. skills_score      技能      20%  —— 纯规则
-  4. personality_score 性格      15%  —— Qwen (MBTI + 星座)
-  5. interest_score    兴趣爱好  15%  —— Qwen (bio)
+默认权重：
+  objective_score   客观信息   30%  —— Qwen（学校/专业/预算/老家/bio客观部分）
+  habits_score      生活习惯   40%  —— Qwen（习惯选项 + bio生活习惯部分）
+  personality_score 性格兴趣   30%  —— Qwen（MBTI/星座/bio性格兴趣部分）
 
-缺失规则：
-  - 某维度数据为空 → 该维度权重降为 5%（最低保底）
-  - 剩余权重按各维度默认比例等比扩大，补齐到 100%
+技能：不参与评分，只返回 skills_label = "相同" | "互补" | None
 
-分数细则
-──────────────────────────────────────────────────────────
-habits_score (0-100, 纯规则)
-  作息完全相同           +40
-  一方弹性               +20
-  饮食完全相同           +25  (含口味偏好 +5)
-  无生活冲突             +35 / 1条冲突 +10 / 2+条冲突 0
-  满分=100，按比例归一化
+缺失规则：某维度数据为空 → 该维度权重降为 5%，其余等比扩大
 
-objective_score (0-100, 纯规则)
-  同校                   +40 (最高权)
-  同校区/study_state     +20
-  同专业                 +25
-  预算差≤20%             +15 / ≤40% +8
-  满分=100，按比例归一化
-
-skills_score (0-100, 纯规则)
-  共同技能: 每个 +20，最高 100
-  无技能数据 → 返回 None，触发降权
-
-personality_score (0-100, Qwen)
-  MBTI + 星座综合判断
-  任一缺失 → 返回 None，触发降权
-
-interest_score (0-100, Qwen)
-  bio 兴趣分析
-  两人都无 bio → 返回 None，触发降权
+总分 = w_obj * objective + w_hab * habits + w_per * personality
 ══════════════════════════════════════════════════════════
 """
 
@@ -48,235 +20,242 @@ import asyncio
 from openai import OpenAI
 from database import UserProfile
 
-# ── Qwen 客户端（阿里云国际版，香港节点）────────────────────────────────────
+# ── Qwen 客户端 ────────────────────────────────────────────
 qwen_client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
-    base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",  # ← 改这里
+    base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",
 )
 
-# ── 默认权重 ──────────────────────────────────────────────
 DEFAULT_WEIGHTS = {
-    "habits":      0.25,
-    "objective":   0.25,
-    "skills":      0.20,
-    "personality": 0.15,
-    "interest":    0.15,
+    "objective":   0.30,
+    "habits":      0.40,
+    "personality": 0.30,
 }
-MIN_WEIGHT = 0.05  # 缺失维度的保底权重
+MIN_WEIGHT = 0.05
 
 
 def str_to_list(s: str) -> list:
     return [x for x in s.split(",") if x] if s else []
 
 
+def _call_qwen(prompt: str) -> dict:
+    """同步调用 Qwen，返回解析后的 dict，失败返回 {}"""
+    try:
+        resp = qwen_client.chat.completions.create(
+            model="qwen-flash",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.choices[0].message.content.strip()
+        text = text.replace("```json", "").replace("```", "").strip()
+        return json.loads(text)
+    except Exception as e:
+        print(f"Qwen 调用失败: {e}")
+        return {}
+
+
 # ══════════════════════════════════════════════════════════
-# 维度 1：生活习惯（纯规则）
+# 维度 1：客观信息（Qwen，综合学校/专业/预算/老家/bio客观部分）
 # ══════════════════════════════════════════════════════════
-def compute_habits_score(me: UserProfile, other: UserProfile) -> float:
+async def compute_objective_score(
+    me: UserProfile, other: UserProfile
+) -> tuple[float | None, str | None]:
     """
-    返回 0-100。
-    作息(40) + 饮食(25) + 冲突检测(35) = 满分 100
+    返回 (score 0-100, reason)。
+    两人关键客观字段都为空时返回 (None, None) → 触发降权。
     """
-    score = 0.0
+    has_data = any([
+        me.school, me.major, me.study_country, me.study_state,
+        me.budget_max, me.nationality, me.native_language, me.bio,
+    ])
+    if not has_data:
+        return None, None
 
-    # 作息（满分 40）
-    if me.sleep_habit and other.sleep_habit:
-        if me.sleep_habit == other.sleep_habit:
-            score += 40
-        elif "flexible" in (me.sleep_habit, other.sleep_habit):
-            score += 20
+    prompt = f"""你是留学生舍友匹配专家。请根据以下两位同学的客观基本信息，评估他们作为舍友的客观条件匹配程度。
 
-    # 饮食（满分 25）
-    if me.diet_habit and other.diet_habit:
-        if me.diet_habit == other.diet_habit:
-            score += 20
-            if (me.diet_habit == "together"
-                    and me.food_preference and other.food_preference
-                    and me.food_preference == other.food_preference):
-                score += 5
-        else:
-            casual = {"separate", "flexible", "各自解决"}
-            if me.diet_habit in casual and other.diet_habit in casual:
-                score += 8
+评估维度（重要性从高到低）：
+1. 留学国家/学校/校区/专业是否相同或相近
+2. 租房预算是否接近（差距越小越好）
+3. 老家/国籍/母语是否相同
+4. 个人介绍中提到的学校、专业、老家、背景等客观信息
 
-    # 生活习惯冲突（满分 35）
-    my_h  = set(str_to_list(me.habits or ""))
-    oth_h = set(str_to_list(other.habits or ""))
-    conflicts = 0
-    pairs = [("smoking", "no_smoking"), ("pet", "no_pet")]
-    for a, b in pairs:
-        if (a in my_h and b in oth_h) or (b in my_h and a in oth_h):
-            conflicts += 1
-    my_clean  = my_h  & {"clean_high", "clean_mid", "clean_low"}
-    oth_clean = oth_h & {"clean_high", "clean_mid", "clean_low"}
-    if my_clean and oth_clean and my_clean != oth_clean:
-        if (("clean_high" in my_clean and "clean_low" in oth_clean)
-                or ("clean_low" in my_clean and "clean_high" in oth_clean)):
-            conflicts += 1
-    if conflicts == 0:
-        score += 35
-    elif conflicts == 1:
-        score += 10
+A的信息：
+- 学校：{me.school or '未填写'}
+- 专业：{me.major or '未填写'}
+- 留学国家：{me.study_country or '未填写'}
+- 校区/州：{me.study_state or '未填写'}
+- 城市：{me.city or '未填写'}
+- 预算上限：{me.budget_max or '未填写'} {me.budget_currency or ''}
+- 国籍：{me.nationality or '未填写'}
+- 母语：{me.native_language or '未填写'}
+- 个人介绍：{me.bio or '未填写'}
 
-    return min(score, 100.0)
+B的信息：
+- 学校：{other.school or '未填写'}
+- 专业：{other.major or '未填写'}
+- 留学国家：{other.study_country or '未填写'}
+- 校区/州：{other.study_state or '未填写'}
+- 城市：{other.city or '未填写'}
+- 预算上限：{other.budget_max or '未填写'} {other.budget_currency or ''}
+- 国籍：{other.nationality or '未填写'}
+- 母语：{other.native_language or '未填写'}
+- 个人介绍：{other.bio or '未填写'}
+
+评分标准：满分100，完全一致的关键信息（同校同专业同预算范围）接近100，完全不同接近0。
+只输出JSON：{{"score": 75, "reason": "一句话说明主要匹配或不匹配的点"}}
+不输出任何其他内容。"""
+
+    data = await asyncio.to_thread(_call_qwen, prompt)
+    if not data:
+        return 50.0, None
+    return float(data.get("score", 50)), data.get("reason")
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 2：客观信息（纯规则）
+# 维度 2：生活习惯（Qwen，习惯选项 + bio生活习惯部分）
 # ══════════════════════════════════════════════════════════
-def compute_objective_score(me: UserProfile, other: UserProfile) -> float:
+async def compute_habits_score(
+    me: UserProfile, other: UserProfile
+) -> tuple[float | None, str | None]:
     """
-    返回 0-100。
-    同校(40) + 同校区(20) + 同专业(25) + 预算(15) = 满分 100
+    返回 (score 0-100, reason)。
+    习惯数据完全为空时返回 (None, None)。
     """
-    score = 0.0
+    has_data = any([
+        me.sleep_habit, me.diet_habit, me.habits, me.bio,
+    ])
+    if not has_data:
+        return None, None
 
-    # 同校（40）
-    if (me.school and other.school
-            and me.school.strip().lower() == other.school.strip().lower()):
-        score += 40
+    my_habits = str_to_list(me.habits or "")
+    oth_habits = str_to_list(other.habits or "")
 
-    # 同校区 / study_state（20）
-    if (me.study_state and other.study_state
-            and me.study_state.strip().lower() == other.study_state.strip().lower()):
-        score += 20
+    prompt = f"""你是留学生舍友匹配专家。请根据以下两位同学的生活习惯信息，评估他们作为舍友的生活习惯契合程度。
 
-    # 同专业（25）
-    if (me.major and other.major
-            and me.major.strip().lower() == other.major.strip().lower()):
-        score += 25
+评估维度（重要性从高到低）：
+1. 作息时间（早睡早起 vs 晚睡晚起）——冲突最影响同住体验
+2. 生活习惯标签（抽烟/不抽烟、有宠物/不接受宠物、整洁程度）——有冲突大幅扣分
+3. 饮食习惯（一起吃/各自解决/外卖）
+4. 个人介绍中关于作息、卫生、宠物、带人进家等生活方式描述
 
-    # 预算差距（15）
-    my_max  = me.budget_max  or 0
-    oth_max = other.budget_max or 0
-    if my_max > 0 and oth_max > 0:
-        diff = abs(my_max - oth_max) / max(my_max, oth_max)
-        if diff <= 0.20:
-            score += 15
-        elif diff <= 0.40:
-            score += 8
+A的生活习惯：
+- 作息：{me.sleep_habit or '未填写'}
+- 饮食：{me.diet_habit or '未填写'}{f'（偏好：{me.food_preference}）' if me.food_preference else ''}
+- 生活习惯标签：{', '.join(my_habits) if my_habits else '未填写'}
+- 个人介绍：{me.bio or '未填写'}
 
-    return min(score, 100.0)
+B的生活习惯：
+- 作息：{other.sleep_habit or '未填写'}
+- 饮食：{other.diet_habit or '未填写'}{f'（偏好：{other.food_preference}）' if other.food_preference else ''}
+- 生活习惯标签：{', '.join(oth_habits) if oth_habits else '未填写'}
+- 个人介绍：{other.bio or '未填写'}
+
+重要规则：
+- 抽烟 vs 不抽烟：严重冲突，大幅扣分（-30以上）
+- 有宠物 vs 不接受宠物：严重冲突，大幅扣分（-25以上）
+- 极度爱干净 vs 不在乎卫生：严重冲突，扣分（-20以上）
+- 作息差异超过3小时：明显冲突，扣分（-15以上）
+
+评分标准：满分100，完全无冲突且高度相似接近100，有严重冲突接近0。
+只输出JSON：{{"score": 75, "reason": "一句话说明主要匹配或冲突点"}}
+不输出任何其他内容。"""
+
+    data = await asyncio.to_thread(_call_qwen, prompt)
+    if not data:
+        return 50.0, None
+    return float(data.get("score", 50)), data.get("reason")
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 3：技能（纯规则）
-# ══════════════════════════════════════════════════════════
-def compute_skills_score(me: UserProfile, other: UserProfile) -> float | None:
-    """
-    返回 0-100，或 None（两人都无技能数据时触发降权）。
-    共同技能每个 +20，上限 100。
-    """
-    my_skills  = set(s.strip().lower() for s in str_to_list(me.special_skills  or ""))
-    oth_skills = set(s.strip().lower() for s in str_to_list(other.special_skills or ""))
-
-    if not my_skills and not oth_skills:
-        return None  # 触发降权
-
-    common = my_skills & oth_skills
-    return min(len(common) * 20, 100.0)
-
-
-# ══════════════════════════════════════════════════════════
-# 维度 4：性格（Qwen）
+# 维度 3：性格兴趣（Qwen，MBTI + 星座 + bio性格兴趣部分）
 # ══════════════════════════════════════════════════════════
 async def compute_personality_score(
     me: UserProfile, other: UserProfile
 ) -> tuple[float | None, str | None]:
     """
-    返回 (score, reason)。
-    MBTI 或星座缺失时返回 (None, None) → 调用方触发降权。
+    返回 (score 0-100, reason)。
+    MBTI、星座、bio 全部为空时返回 (None, None)。
     """
-    if not me.mbti or not other.mbti or not me.zodiac or not other.zodiac:
+    has_data = any([me.mbti, me.zodiac, me.bio])
+    if not has_data:
         return None, None
 
-    prompt = (
-        "你是一个舍友兼容性专家。请综合判断以下两人的性格作为室友的整体兼容性。\n\n"
-        f"人物A：MBTI={me.mbti}，星座={me.zodiac}\n"
-        f"人物B：MBTI={other.mbti}，星座={other.zodiac}\n\n"
-        "原则：整体判断，不要分别打分相加；50分为中等；低于40不建议；高于75推荐。\n"
-        '只输出JSON：{"score": 75, "reason": "一句话"}\n'
-        "score范围0-100，不输出任何其他内容。"
-    )
-    try:
-        resp = await asyncio.to_thread(
-            lambda: qwen_client.chat.completions.create(
-                model="qwen-flash",
-                messages=[{"role": "user", "content": prompt}],
-            )
-        )
-        text = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "")
-        data = json.loads(text)
-        return float(data.get("score", 50)), data.get("reason")
-    except Exception as e:
-        print(f"Qwen personality API 调用失败: {e}")
+    prompt = f"""你是留学生舍友匹配专家，熟悉权威的MBTI兼容性研究和星座性格分析。
+请综合评估以下两位同学的性格与兴趣爱好契合程度，作为判断舍友相处是否愉快的依据。
+
+评估维度：
+1. MBTI性格类型兼容性（基于权威MBTI配对研究：如INFJ与ENFP高度互补，ENTJ与INTP良好等）
+2. 星座性格兼容性（综合判断，不要机械对应）
+3. 个人介绍中关于性格、爱好、生活态度、兴趣的描述
+
+A的性格兴趣：
+- MBTI：{me.mbti or '未填写'}
+- 星座：{me.zodiac or '未填写'}
+- 个人介绍：{me.bio or '未填写'}
+
+B的性格兴趣：
+- MBTI：{other.mbti or '未填写'}
+- 星座：{other.zodiac or '未填写'}
+- 个人介绍：{other.bio or '未填写'}
+
+评分标准：满分100，性格高度互补或相似且兴趣有共鸣接近100，性格严重冲突接近0，50分为中等兼容。
+只输出JSON：{{"score": 75, "reason": "一句话说明性格兴趣匹配情况"}}
+不输出任何其他内容。"""
+
+    data = await asyncio.to_thread(_call_qwen, prompt)
+    if not data:
         return 50.0, None
+    return float(data.get("score", 50)), data.get("reason")
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 5：兴趣爱好（Qwen）
+# 技能标签（不参与评分）
 # ══════════════════════════════════════════════════════════
-async def compute_interest_score(
-    me: UserProfile, other: UserProfile, search_query: str = None
-) -> tuple[float | None, str | None]:
+def compute_skills_label(me: UserProfile, other: UserProfile) -> str | None:
     """
-    返回 (score, reason)。
-    两人都无 bio 时返回 (None, None) → 调用方触发降权。
+    返回 "相同" | "互补" | None（双方都没有技能时）
     """
-    if not me.bio and not other.bio and not search_query:
-        return None, None
+    my_skills  = set(s.strip().lower() for s in str_to_list(me.special_skills  or ""))
+    oth_skills = set(s.strip().lower() for s in str_to_list(other.special_skills or ""))
 
-    sq_part = f"\n搜索词补充：{search_query}" if search_query else ""
-    prompt = (
-        f"你是留学生舍友兴趣匹配专家。请分析两位同学在兴趣爱好、个人风格方面的契合度。{sq_part}\n\n"
-        f"A的介绍：{me.bio or '未填写'}\n"
-        f"B的介绍：{other.bio or '未填写'}\n\n"
-        "评估共同话题、生活风格、价值观契合度。\n"
-        '只输出JSON：{"score": 70, "match": ["共同点1"], "reason": "一句话"}\n'
-        "score范围0-100，不输出其他内容。"
-    )
-    data = {}  # ← 加这行
-    try:
-        resp = await asyncio.to_thread(
-            lambda: qwen_client.chat.completions.create(
-                model="qwen-flash",
-                messages=[{"role": "user", "content": prompt}],
-            )
-        )
-        print(f"✅ Qwen interest 调用成功，score={data.get('score')}")  # 加这行
-        text = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "")
-        data = json.loads(text)
-        pts  = data.get("match", [])
-        rsn  = data.get("reason", "")
-        full = ""
-        if pts: full += "🎯 共同点：" + "、".join(pts)
-        if rsn: full += ("\n" if full else "") + "💡 " + rsn
-        return float(data.get("score", 60)), full.strip() or None
-    except Exception as e:
-        print(f"Qwen interest API 调用失败: {e}")
-        return 60.0, None
+    if not my_skills and not oth_skills:
+        return None
+
+    common = my_skills & oth_skills
+    # 有任何共同技能 → 相同；否则 → 互补
+    if common:
+        return "相同"
+    return "互补"
 
 
 # ══════════════════════════════════════════════════════════
-# 权重计算 + 总分合并
+# 权重计算 + 总分
 # ══════════════════════════════════════════════════════════
 def resolve_weights(
-    skills_score:      float | None,
+    objective_score:   float | None,
+    habits_score:      float | None,
     personality_score: float | None,
-    interest_score:    float | None,
+    custom_weights:    dict | None = None,
 ) -> dict[str, float]:
+    """
+    custom_weights 格式：{"objective": 0.3, "habits": 0.4, "personality": 0.3}
+    缺失维度固定 MIN_WEIGHT，其余按 custom 或 default 比例等比扩大。
+    """
+    base = custom_weights if custom_weights else dict(DEFAULT_WEIGHTS)
+
     missing = []
-    if skills_score      is None: missing.append("skills")
+    if objective_score   is None: missing.append("objective")
+    if habits_score      is None: missing.append("habits")
     if personality_score is None: missing.append("personality")
-    if interest_score    is None: missing.append("interest")
 
     if not missing:
-        return dict(DEFAULT_WEIGHTS)
+        # 归一化 base（防止用户自定义权重不等于1）
+        total = sum(base.values())
+        return {k: v / total for k, v in base.items()}
 
     reserved    = MIN_WEIGHT * len(missing)
     pool        = 1.0 - reserved
-    present     = {k: v for k, v in DEFAULT_WEIGHTS.items() if k not in missing}
-    present_sum = sum(present.values())
+    present     = {k: v for k, v in base.items() if k not in missing}
+    present_sum = sum(present.values()) or 1.0
 
     weights = {k: v / present_sum * pool for k, v in present.items()}
     for k in missing:
@@ -285,31 +264,19 @@ def resolve_weights(
 
 
 def compute_total_score(
-    habits_score:      float,
-    objective_score:   float,
-    skills_score:      float | None,
+    objective_score:   float | None,
+    habits_score:      float | None,
     personality_score: float | None,
-    interest_score:    float | None,
+    custom_weights:    dict | None = None,
 ) -> tuple[float, dict[str, float]]:
-    w = resolve_weights(skills_score, personality_score, interest_score)
+    """
+    返回 (total_0_100, weights_used)
+    """
+    w = resolve_weights(objective_score, habits_score, personality_score, custom_weights)
 
-    s_skills      = skills_score      if skills_score      is not None else 50.0
-    s_personality = personality_score if personality_score is not None else 50.0
-    s_interest    = interest_score    if interest_score    is not None else 50.0
+    o = objective_score   if objective_score   is not None else 50.0
+    h = habits_score      if habits_score      is not None else 50.0
+    p = personality_score if personality_score is not None else 50.0
 
-    total = (
-        habits_score    * w["habits"]      +
-        objective_score * w["objective"]   +
-        s_skills        * w["skills"]      +
-        s_personality   * w["personality"] +
-        s_interest      * w["interest"]
-    )
+    total = o * w["objective"] + h * w["habits"] + p * w["personality"]
     return round(min(total, 100.0), 1), w
-
-
-# ── 旧接口兼容 ──────────────────────────────────────────────
-def compute_rule_score(me, other, priorities=None):
-    return compute_habits_score(me, other)
-
-async def compute_ai_score(me, other, search_query=None, priorities=None):
-    return await compute_interest_score(me, other, search_query)
