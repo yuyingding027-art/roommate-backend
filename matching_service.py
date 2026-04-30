@@ -201,7 +201,7 @@ async def compute_personality_score(
     try:
         resp = await asyncio.to_thread(
             lambda: qwen_client.chat.completions.create(
-                model="qwen-plus",
+                model="qwen-flash",
                 messages=[{"role": "user", "content": prompt}],
             )
         )
@@ -239,7 +239,7 @@ async def compute_interest_score(
     try:
         resp = await asyncio.to_thread(
             lambda: qwen_client.chat.completions.create(
-                model="qwen-plus",
+                model="qwen-flash",
                 messages=[{"role": "user", "content": prompt}],
             )
         )
