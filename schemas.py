@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict
 from uuid import UUID
 from datetime import datetime
@@ -56,7 +56,7 @@ class ProfileCreate(BaseModel):
 
 class ProfileResponse(ProfileCreate):
     user_id: UUID
-    email: Optional[str] = None          # 注册所用教育邮箱，只读展示
+    email: Optional[str] = None
     profile_summary: Optional[str] = None
     updated_at: Optional[datetime] = None
     model_config = {"from_attributes": True}
@@ -87,24 +87,33 @@ class MatchResult(BaseModel):
     special_skills: Optional[List[str]]
     bio: Optional[str]
     avatar_url: Optional[str]
-    email: Optional[str] = None          # 对方的教育邮箱，卡片可选展示
+    email: Optional[str] = None
 
-    # ── 旧字段（保留兼容）──
-    rule_score:        float = 0.0
-    ai_score:          float = 0.0
-    personality_score: float = 0.0
+    # ── 三维度分数 ──────────────────────────────────────
     total_score:       float = 0.0
+    objective_score:   float = 0.0   # 客观信息 30%
+    habits_score:      float = 0.0   # 生活习惯 40%
+    personality_score: float = 0.0   # 性格兴趣 30%（原personality+interest合并）
 
-    # ── 5维度独立分数 ──
-    habits_score:      float = 0.0
-    objective_score:   float = 0.0
-    skills_score:      float = 0.0
-    interest_score:    float = 0.0
+    # ── 技能标签（不参与评分）──────────────────────────
+    skills_label: Optional[str] = None  # "相同" | "互补" | None
 
-    # ── 实际权重 ──
+    # ── 实际使用权重 ────────────────────────────────────
     score_weights: Optional[Dict[str, float]] = None
 
-    match_reason: Optional[str] = None
+    # ── AI 评语 ─────────────────────────────────────────
+    match_reason:        Optional[str] = None  # 综合评语
+    objective_reason:    Optional[str] = None  # 客观维度说明
+    habits_reason:       Optional[str] = None  # 习惯维度说明
+    personality_reason:  Optional[str] = None  # 性格兴趣维度说明
+
+    # ── 旧字段保留兼容（前端旧代码不报错）──────────────
+    rule_score:    float = 0.0
+    ai_score:      float = 0.0
+    skills_score:  float = 0.0
+    interest_score: float = 0.0
+    match_points:   Optional[List[str]] = None
+    mismatch_points: Optional[List[str]] = None
 
 # ─── Chat ────────────────────────────────────────────────
 class MessageSend(BaseModel):
