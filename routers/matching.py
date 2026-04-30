@@ -2,17 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
-import re
 import json
 from database import get_db, User, UserProfile, MatchScore
 from schemas import MatchResult
 from auth_utils import get_current_user
 from matching_service import (
-    compute_habits_score,
     compute_objective_score,
-    compute_skills_score,
+    compute_habits_score,
     compute_personality_score,
-    compute_interest_score,
+    compute_skills_label,
     compute_total_score,
 )
 import asyncio
@@ -24,77 +22,53 @@ def str_to_list(s: str) -> list:
     return [x for x in s.split(",") if x] if s else []
 
 
-# ─── 强筛选关键词映射 ────────────────────────────────────────────────────────
-GENDER_MAP = {
-    "女": ["女", "female", "f"], "女性": ["女", "female", "f"], "女生": ["女", "female", "f"],
-    "男": ["男", "male", "m"],   "男性": ["男", "male", "m"],   "男生": ["男", "male", "m"],
-}
-HABIT_MAP = {
-    "不抽烟": "no_smoking", "不吸烟": "no_smoking", "不烟": "no_smoking",
-    "抽烟": "smoking", "吸烟": "smoking",
-    "有猫": "pet", "有狗": "pet", "有宠物": "pet", "养宠物": "pet",
-    "不养宠物": "no_pet", "没有宠物": "no_pet",
-    "爱干净": "clean_high", "整洁": "clean_high", "干净": "clean_high",
-}
-SLEEP_MAP = {
-    "早睡": "early", "早起": "early",
-    "晚睡": "late", "夜猫": "late", "夜猫子": "late", "熬夜": "late",
-    "弹性作息": "flexible",
-}
-SKILL_MAP = {
-    "杀虫": "杀虫", "杀虫子": "杀虫", "灭虫": "杀虫",
-    "做饭": "做饭", "烹饪": "做饭",
-    "开车": "开车", "有车": "开车",
-    "修电脑": "修电脑", "调酒": "调酒",
-}
-
-
-def parse_hard_filters(search_query: str) -> dict:
-    if not search_query:
-        return {}
-    filters, remaining = {}, search_query
-    for kw, vals in GENDER_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters["gender"] = vals
-    for kw, val in SLEEP_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters["sleep_habit"] = val
-    for kw, val in HABIT_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters.setdefault("habits_required", [])
-            if val not in filters["habits_required"]:
-                filters["habits_required"].append(val)
-    for kw, val in SKILL_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters.setdefault("skills_required", [])
-            if val not in filters["skills_required"]:
-                filters["skills_required"].append(val)
-    soft = re.sub(r"[，,、。\s]+", " ", remaining).strip()
-    if soft:
-        filters["soft_query"] = soft
-    return filters
-
-
-def hard_filter_profiles(all_profiles: list, filters: dict) -> list:
+# ─── 严格筛选（搜索框上方填空）───────────────────────────────────────────────
+def hard_filter_profiles(
+    all_profiles: list,
+    study_country: Optional[str] = None,
+    school:        Optional[str] = None,
+    study_state:   Optional[str] = None,
+    gender:        Optional[str] = None,
+    language:      Optional[str] = None,
+) -> list:
+    """
+    所有传入的非空字段都必须严格匹配（AND逻辑）。
+    空字段不筛选。
+    """
     result = []
     for p in all_profiles:
-        if "gender" in filters:
-            if not p.gender or p.gender.strip().lower() not in [g.lower() for g in filters["gender"]]:
+        if study_country:
+            if not p.study_country:
                 continue
-        if "sleep_habit" in filters:
-            if (p.sleep_habit or "").strip() != filters["sleep_habit"]:
+            if p.study_country.strip().lower() != study_country.strip().lower():
                 continue
-        if "habits_required" in filters:
-            ph = set(str_to_list(p.habits or ""))
-            if not set(filters["habits_required"]).issubset(ph):
+        if school:
+            if not p.school:
                 continue
-        if "skills_required" in filters:
-            st = (p.special_skills or "").lower()
-            if not all(s.lower() in st for s in filters["skills_required"]):
+            if school.strip().lower() not in p.school.strip().lower():
+                continue
+        if study_state:
+            if not p.study_state:
+                continue
+            if p.study_state.strip().lower() != study_state.strip().lower():
+                continue
+        if gender:
+            if not p.gender:
+                continue
+            # 支持中英文匹配
+            gender_map = {
+                "女": ["女", "female", "f"],
+                "男": ["男", "male", "m"],
+                "female": ["女", "female", "f"],
+                "male": ["男", "male", "m"],
+            }
+            allowed = gender_map.get(gender.lower(), [gender.lower()])
+            if p.gender.strip().lower() not in [g.lower() for g in allowed]:
+                continue
+        if language:
+            if not p.native_language:
+                continue
+            if p.native_language.strip().lower() != language.strip().lower():
                 continue
         result.append(p)
     return result
@@ -107,8 +81,18 @@ async def get_matches(
     db: AsyncSession = Depends(get_db),
     limit: int = 20,
     refresh: bool = False,
+    # ── 严格筛选参数（对应搜索框上方填空）──
+    filter_study_country: Optional[str] = None,
+    filter_school:        Optional[str] = None,
+    filter_study_state:   Optional[str] = None,
+    filter_gender:        Optional[str] = None,
+    filter_language:      Optional[str] = None,
+    # ── 自定义权重（0-100整数，后端归一化）──
+    weight_objective:   Optional[int] = None,  # 默认30
+    weight_habits:      Optional[int] = None,  # 默认40
+    weight_personality: Optional[int] = None,  # 默认30
+    # ── 搜索词（传给AI做软匹配）──
     search_query: Optional[str] = None,
-    priorities: Optional[str] = None,
 ):
     result = await db.execute(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
@@ -124,23 +108,49 @@ async def get_matches(
     if not all_profiles:
         return []
 
-    # ── 查出所有候选人的 email（一次批量查询）──────────────────────────────
+    # 批量查 email
     user_ids = [p.user_id for p in all_profiles]
     users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
     email_map: dict = {u.id: u.email for u in users_result.scalars().all()}
 
-    # 强筛选
-    hard_filters = parse_hard_filters(search_query or "")
-    soft_query   = hard_filters.pop("soft_query", None) or search_query
-    candidates   = hard_filter_profiles(all_profiles, hard_filters) if hard_filters else all_profiles
-    if hard_filters and not candidates:
+    # 严格筛选
+    has_filters = any([
+        filter_study_country, filter_school, filter_study_state,
+        filter_gender, filter_language,
+    ])
+    candidates = (
+        hard_filter_profiles(
+            all_profiles,
+            study_country = filter_study_country,
+            school        = filter_school,
+            study_state   = filter_study_state,
+            gender        = filter_gender,
+            language      = filter_language,
+        )
+        if has_filters else all_profiles
+    )
+    if has_filters and not candidates:
         return []
 
-    if search_query or priorities:
+    # 自定义权重（归一化到总和=1）
+    custom_weights = None
+    if any(w is not None for w in [weight_objective, weight_habits, weight_personality]):
+        wo = weight_objective   if weight_objective   is not None else 30
+        wh = weight_habits      if weight_habits      is not None else 40
+        wp = weight_personality if weight_personality is not None else 30
+        total_w = wo + wh + wp or 100
+        custom_weights = {
+            "objective":   wo / total_w,
+            "habits":      wh / total_w,
+            "personality": wp / total_w,
+        }
+
+    # 有筛选/自定义权重/搜索词时强制刷新
+    if has_filters or custom_weights or search_query:
         refresh = True
 
-    # 缓存命中
-    if not refresh and not hard_filters:
+    # 缓存命中（无任何筛选时）
+    if not refresh:
         cached = await db.execute(
             select(MatchScore)
             .where(MatchScore.user_id == current_user.id)
@@ -151,34 +161,46 @@ async def get_matches(
         if len(cached_scores) == len(all_profiles):
             return await _build_match_results(cached_scores, db, email_map)
 
-    semaphore = asyncio.Semaphore(10)
+    semaphore = asyncio.Semaphore(5)  # Qwen并发限制
 
     async def score_one(other: UserProfile):
-        habits      = compute_habits_score(my_profile, other)
-        objective   = compute_objective_score(my_profile, other)
-        skills      = compute_skills_score(my_profile, other)
         async with semaphore:
-            personality, p_reason = await compute_personality_score(my_profile, other)
-            interest,    i_reason = await compute_interest_score(my_profile, other, soft_query)
+            obj_score,  obj_reason  = await compute_objective_score(my_profile, other)
+            hab_score,  hab_reason  = await compute_habits_score(my_profile, other)
+            per_score,  per_reason  = await compute_personality_score(my_profile, other)
 
-        total, weights = compute_total_score(habits, objective, skills, personality, interest)
+        skills_lbl = compute_skills_label(my_profile, other)
+        total, weights = compute_total_score(obj_score, hab_score, per_score, custom_weights)
 
+        # 合并评语
         reason_parts = []
-        if i_reason:
-            reason_parts.append(i_reason)
-        if p_reason:
-            reason_parts.append(f"🌟 性格兼容：{p_reason}")
+        if obj_reason: reason_parts.append(f"📍 客观：{obj_reason}")
+        if hab_reason: reason_parts.append(f"🏠 习惯：{hab_reason}")
+        if per_reason: reason_parts.append(f"✨ 性格兴趣：{per_reason}")
         match_reason = "\n".join(reason_parts) or None
 
-        return (other, habits, objective, skills, personality, interest, total, weights, match_reason)
+        return (
+            other,
+            obj_score, hab_score, per_score,
+            skills_lbl, total, weights,
+            obj_reason, hab_reason, per_reason,
+            match_reason,
+        )
 
     tasks   = [score_one(p) for p in candidates]
     results = await asyncio.gather(*tasks)
-    valid   = sorted(results, key=lambda x: x[6], reverse=True)[:limit]
+    valid   = sorted(results, key=lambda x: x[5], reverse=True)[:limit]
 
-    # 写入/更新缓存
+    # 写缓存
     for row in valid:
-        other, habits, objective, skills, personality, interest, total, weights, match_reason = row
+        (other, obj_score, hab_score, per_score,
+         skills_lbl, total, weights,
+         obj_reason, hab_reason, per_reason, match_reason) = row
+
+        o = obj_score if obj_score is not None else 50.0
+        h = hab_score if hab_score is not None else 50.0
+        p = per_score if per_score is not None else 50.0
+
         existing = await db.execute(
             select(MatchScore).where(
                 MatchScore.user_id == current_user.id,
@@ -186,36 +208,33 @@ async def get_matches(
             )
         )
         ms = existing.scalar_one_or_none()
-        p_score = personality if personality is not None else 50.0
-        i_score = interest    if interest    is not None else 50.0
-        s_score = skills      if skills      is not None else 0.0
+
+        extra = {
+            "objective_score":   o,
+            "habits_score":      h,
+            "personality_score": p,
+            "total_score":       total,
+            "match_reason":      match_reason,
+            # 旧字段兼容
+            "rule_score":        h,
+            "ai_score":          o,
+        }
+        if hasattr(MatchScore, "skills_label"):   extra["skills_label"]   = skills_lbl
+        if hasattr(MatchScore, "score_weights"):  extra["score_weights"]  = json.dumps(weights)
+        if hasattr(MatchScore, "objective_reason"): extra["objective_reason"]   = obj_reason
+        if hasattr(MatchScore, "habits_reason"):    extra["habits_reason"]      = hab_reason
+        if hasattr(MatchScore, "personality_reason"): extra["personality_reason"] = per_reason
 
         if ms:
-            ms.rule_score        = habits
-            ms.ai_score          = i_score
-            ms.personality_score = p_score
-            ms.total_score       = total
-            ms.match_reason      = match_reason
-            if hasattr(ms, "habits_score"):    ms.habits_score    = habits
-            if hasattr(ms, "objective_score"): ms.objective_score = objective
-            if hasattr(ms, "skills_score"):    ms.skills_score    = s_score
-            if hasattr(ms, "interest_score"):  ms.interest_score  = i_score
-            if hasattr(ms, "score_weights"):   ms.score_weights   = json.dumps(weights)
+            for k, v in extra.items():
+                if hasattr(ms, k):
+                    setattr(ms, k, v)
         else:
-            kwargs = dict(
-                user_id           = current_user.id,
-                target_user_id    = other.user_id,
-                rule_score        = habits,
-                ai_score          = i_score,
-                personality_score = p_score,
-                total_score       = total,
-                match_reason      = match_reason,
-            )
-            if hasattr(MatchScore, "habits_score"):    kwargs["habits_score"]    = habits
-            if hasattr(MatchScore, "objective_score"): kwargs["objective_score"] = objective
-            if hasattr(MatchScore, "skills_score"):    kwargs["skills_score"]    = s_score
-            if hasattr(MatchScore, "interest_score"):  kwargs["interest_score"]  = i_score
-            if hasattr(MatchScore, "score_weights"):   kwargs["score_weights"]   = json.dumps(weights)
+            kwargs = {
+                "user_id":          current_user.id,
+                "target_user_id":   other.user_id,
+            }
+            kwargs.update({k: v for k, v in extra.items() if hasattr(MatchScore, k)})
             db.add(MatchScore(**kwargs))
 
     await db.commit()
@@ -223,10 +242,14 @@ async def get_matches(
     # 构建返回
     match_results = []
     for row in valid:
-        other, habits, objective, skills, personality, interest, total, weights, match_reason = row
-        p_score = personality if personality is not None else 50.0
-        i_score = interest    if interest    is not None else 50.0
-        s_score = skills      if skills      is not None else 0.0
+        (other, obj_score, hab_score, per_score,
+         skills_lbl, total, weights,
+         obj_reason, hab_reason, per_reason, match_reason) = row
+
+        o = obj_score if obj_score is not None else 50.0
+        h = hab_score if hab_score is not None else 50.0
+        p = per_score if per_score is not None else 50.0
+
         match_results.append(MatchResult(
             user_id             = other.user_id,
             name                = other.name,
@@ -252,17 +275,20 @@ async def get_matches(
             special_skills      = str_to_list(other.special_skills or ""),
             bio                 = other.bio,
             avatar_url          = other.avatar_url,
-            email               = email_map.get(other.user_id),   # ← 新增
-            rule_score          = round(habits),
-            ai_score            = round(i_score),
-            personality_score   = round(p_score),
-            total_score         = round(total),
-            habits_score        = round(habits),
-            objective_score     = round(objective),
-            skills_score        = round(s_score),
-            interest_score      = round(i_score),
+            email               = email_map.get(other.user_id),
+            total_score         = total,
+            objective_score     = round(o),
+            habits_score        = round(h),
+            personality_score   = round(p),
+            skills_label        = skills_lbl,
             score_weights       = weights,
             match_reason        = match_reason,
+            objective_reason    = obj_reason,
+            habits_reason       = hab_reason,
+            personality_reason  = per_reason,
+            # 旧字段兼容
+            rule_score          = round(h),
+            ai_score            = round(o),
         ))
     return match_results
 
@@ -286,10 +312,10 @@ async def _build_match_results(cached_scores, db, email_map: dict = None):
             except Exception:
                 weights = {}
 
-        h_score = getattr(ms, "habits_score",    ms.rule_score)
-        o_score = getattr(ms, "objective_score", 0.0)
-        s_score = getattr(ms, "skills_score",    0.0)
-        i_score = getattr(ms, "interest_score",  ms.ai_score)
+        o = getattr(ms, "objective_score",   ms.ai_score   if hasattr(ms, "ai_score")   else 50.0)
+        h = getattr(ms, "habits_score",      ms.rule_score if hasattr(ms, "rule_score")  else 50.0)
+        p = getattr(ms, "personality_score", 50.0)
+        sl = getattr(ms, "skills_label", None)
 
         results.append(MatchResult(
             user_id             = profile.user_id,
@@ -316,16 +342,18 @@ async def _build_match_results(cached_scores, db, email_map: dict = None):
             special_skills      = str_to_list(profile.special_skills or ""),
             bio                 = profile.bio,
             avatar_url          = profile.avatar_url,
-            email               = email_map.get(profile.user_id),  # ← 新增
-            rule_score          = round(ms.rule_score),
-            ai_score            = round(ms.ai_score),
-            personality_score   = round(ms.personality_score),
-            total_score         = round(ms.total_score),
-            habits_score        = round(h_score),
-            objective_score     = round(o_score),
-            skills_score        = round(s_score),
-            interest_score      = round(i_score),
+            email               = email_map.get(profile.user_id),
+            total_score         = ms.total_score,
+            objective_score     = round(o),
+            habits_score        = round(h),
+            personality_score   = round(p),
+            skills_label        = sl,
             score_weights       = weights or None,
             match_reason        = ms.match_reason,
+            objective_reason    = getattr(ms, "objective_reason",   None),
+            habits_reason       = getattr(ms, "habits_reason",      None),
+            personality_reason  = getattr(ms, "personality_reason", None),
+            rule_score          = round(h),
+            ai_score            = round(o),
         ))
     return results
