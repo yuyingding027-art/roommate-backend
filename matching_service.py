@@ -23,7 +23,7 @@ from database import UserProfile
 # ── Qwen 客户端 ────────────────────────────────────────────
 qwen_client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",#https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1
 )
 
 DEFAULT_WEIGHTS = {
