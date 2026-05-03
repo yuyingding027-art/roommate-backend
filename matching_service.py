@@ -46,7 +46,7 @@ def _call_qwen(prompt: str) -> dict:
         return {}
     try:
         resp = qwen_client.chat.completions.create(
-            model="qwen-flash",
+            model="qwen-plus",
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.choices[0].message.content.strip()
