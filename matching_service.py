@@ -23,7 +23,7 @@ from database import UserProfile
 # ── Qwen 客户端 ────────────────────────────────────────────
 qwen_client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
-    base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 )
 
 DEFAULT_WEIGHTS = {
@@ -40,6 +40,10 @@ def str_to_list(s: str) -> list:
 
 def _call_qwen(prompt: str) -> dict:
     """同步调用 Qwen，返回解析后的 dict，失败返回 {}"""
+    api_key = os.getenv("DASHSCOPE_API_KEY")
+    if not api_key:
+        print("❌ DASHSCOPE_API_KEY 未设置")
+        return {}
     try:
         resp = qwen_client.chat.completions.create(
             model="qwen-flash",
@@ -47,9 +51,13 @@ def _call_qwen(prompt: str) -> dict:
         )
         text = resp.choices[0].message.content.strip()
         text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            print(f"❌ JSON解析失败，原文: {text[:200]}")
+            return {}
     except Exception as e:
-        print(f"Qwen 调用失败: {e}")
+        print(f"❌ Qwen调用失败: {type(e).__name__}: {e}")
         return {}
 
 
