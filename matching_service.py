@@ -68,56 +68,120 @@ async def compute_objective_score(
     me: UserProfile, other: UserProfile
 ) -> tuple[float | None, str | None]:
     """
-    返回 (score 0-100, reason)。
-    两人关键客观字段都为空时返回 (None, None) → 触发降权。
+    客观信息分（满分 100，归一化到 0-100）
+
+    结构化规则（95分上限）：
+      留学国家    +15
+      校区/州     +15
+      校区城市    +15
+      母语        +15
+      学校名称    +10
+      专业        +5
+      国籍        +5
+      预算差距    最高+20，每相差1%扣1分
+
+    个人 bio 加分（最多 +5）：
+      每找到一个客观共同点 +1（老家同城/同省、本科院校/专业相同、情感状态相同等）
+      不一致不扣分
+
+    两人关键字段都为空时返回 (None, None) → 触发降权
     """
     has_data = any([
         me.school, me.major, me.study_country, me.study_state,
-        me.budget_max, me.nationality, me.native_language, me.bio,
+        me.city, me.budget_max, me.nationality, me.native_language,
     ])
     if not has_data:
         return None, None
 
-    prompt = f"""你是留学生舍友匹配专家。请根据以下两位同学的客观基本信息，评估他们作为舍友的客观条件匹配程度。
+    score = 0.0
+    reasons = []
 
-评估维度（重要性从高到低）：
-1. 留学国家/学校/校区/专业是否相同或相近
-2. 租房预算是否接近（差距越小越好）
-3. 老家/国籍/母语是否相同
-4. 个人介绍中提到的学校、专业、老家、背景等客观信息
+    # ── 留学国家 +15 ────────────────────────────────────────
+    if me.study_country and other.study_country:
+        if me.study_country.strip().lower() == other.study_country.strip().lower():
+            score += 14.25
+            reasons.append(f"同在{me.study_country}留学")
 
-A的信息：
-- 学校：{me.school or '未填写'}
-- 专业：{me.major or '未填写'}
-- 留学国家：{me.study_country or '未填写'}
-- 校区/州：{me.study_state or '未填写'}
-- 城市：{me.city or '未填写'}
-- 预算上限：{me.budget_max or '未填写'} {me.budget_currency or ''}
-- 国籍：{me.nationality or '未填写'}
-- 母语：{me.native_language or '未填写'}
-- 个人介绍：{me.bio or '未填写'}
+    # ── 校区/州 +15 ─────────────────────────────────────────
+    if me.study_state and other.study_state:
+        if me.study_state.strip().lower() == other.study_state.strip().lower():
+            score += 14.25
+            reasons.append(f"同在{me.study_state}")
 
-B的信息：
-- 学校：{other.school or '未填写'}
-- 专业：{other.major or '未填写'}
-- 留学国家：{other.study_country or '未填写'}
-- 校区/州：{other.study_state or '未填写'}
-- 城市：{other.city or '未填写'}
-- 预算上限：{other.budget_max or '未填写'} {other.budget_currency or ''}
-- 国籍：{other.nationality or '未填写'}
-- 母语：{other.native_language or '未填写'}
-- 个人介绍：{other.bio or '未填写'}
+    # ── 校区城市 +15 ────────────────────────────────────────
+    if me.city and other.city:
+        if me.city.strip().lower() == other.city.strip().lower():
+            score += 14.25
+            reasons.append(f"同城市{me.city}")
 
-评分标准：满分100，完全一致的关键信息（同校同专业同预算范围）接近100，完全不同接近0。
-只输出JSON：{{"score": 75, "reason": "一句话说明主要匹配或不匹配的点"}}
-不输出任何其他内容。"""
+    # ── 母语 +15 ────────────────────────────────────────────
+    if me.native_language and other.native_language:
+        if me.native_language.strip().lower() == other.native_language.strip().lower():
+            score += 14.25
+            reasons.append(f"母语相同（{me.native_language}）")
 
-    data = await asyncio.to_thread(_call_qwen, prompt)
-    if not data:
-        return 50.0, None
-    return float(data.get("score", 50)), data.get("reason")
+    # ── 学校名称 +10 ────────────────────────────────────────
+    if me.school and other.school:
+        if me.school.strip().lower() == other.school.strip().lower():
+            score += 9.5
+            reasons.append(f"同校（{me.school}）")
 
+    # ── 专业 +5 ─────────────────────────────────────────────
+    if me.major and other.major:
+        if me.major.strip().lower() == other.major.strip().lower():
+            score += 4.75
+            reasons.append(f"同专业（{me.major}）")
 
+    # ── 国籍 +5 ─────────────────────────────────────────────
+    if me.nationality and other.nationality:
+        if me.nationality.strip().lower() == other.nationality.strip().lower():
+            score += 4.75
+            reasons.append(f"同国籍（{me.nationality}）")
+
+    # ── 预算差距 最高 +20 ───────────────────────────────────
+    my_max  = me.budget_max  or 0
+    oth_max = other.budget_max or 0
+    if my_max > 0 and oth_max > 0:
+        diff_pct = abs(my_max - oth_max) / max(my_max, oth_max) * 100
+        budget_score = max(0, 19 - diff_pct * 0.95)
+        score += budget_score
+        if budget_score >= 18:
+            reasons.append("预算高度接近")
+        elif budget_score >= 10:
+            reasons.append("预算相近")
+        elif budget_score < 5:
+            reasons.append("预算差距较大")
+
+    # ── bio 客观共同点 最高 +5（轻量 AI）───────────────────
+    bio_score = 0
+    bio_reason = None
+    if me.bio and other.bio:
+        bio_prompt = (
+            "你是一个信息提取助手。请对比以下两段个人介绍，"
+            "找出客观信息上的共同点（仅限：老家同城市、老家同省份、"
+            "本科院校相同、本科专业相同、情感状态相同，如单身/恋爱中）。"
+            "每找到一个共同点得1分，最多5分。"
+            "找不到共同点得0分。不一致的地方不扣分。\n\n"
+            f"A的介绍：{me.bio}\n"
+            f"B的介绍：{other.bio}\n\n"
+            "只输出JSON，不输出任何其他内容：\n"
+            '{"score": 2, "matches": ["老家同为广东", "都是单身"]}'
+        )
+        data = await asyncio.to_thread(_call_qwen, bio_prompt)
+        if data:
+            bio_score = min(int(data.get("score", 0)), 5)
+            matches = data.get("matches", [])
+            if matches:
+                bio_reason = "、".join(matches)
+                reasons.append(bio_reason)
+
+    score += bio_score
+
+    # ── make sure the score boundary is 0-100 ────────────
+    final = min(round(score), 100)
+    reason_str = "；".join(reasons) if reasons else None
+
+    return float(final), reason_str
 # ══════════════════════════════════════════════════════════
 # 维度 2：生活习惯（Qwen，习惯选项 + bio生活习惯部分）
 # ══════════════════════════════════════════════════════════
