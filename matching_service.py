@@ -20,7 +20,7 @@ import asyncio
 from openai import OpenAI
 from database import UserProfile
 
-# ── Qwen 客户端 ────────────────────────────────────────────
+# ── Qwen  ────────────────────────────────────────────
 qwen_client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",#https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1
@@ -48,6 +48,7 @@ def _call_qwen(prompt: str) -> dict:
         resp = qwen_client.chat.completions.create(
             model="qwen-plus",
             messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
         )
         text = resp.choices[0].message.content.strip()
         text = text.replace("```json", "").replace("```", "").strip()
