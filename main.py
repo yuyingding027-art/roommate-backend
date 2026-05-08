@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 from database import create_tables
-from routers import auth, users, matching, chat, translate
+from routers import auth, users, matching, chat, translate, roommates
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,11 +21,12 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-app.include_router(auth.router,      prefix="/api/auth",      tags=["认证"])
-app.include_router(users.router,     prefix="/api/users",     tags=["用户"])
-app.include_router(matching.router,  prefix="/api/matching",  tags=["匹配"])
-app.include_router(chat.router,      prefix="/api/chat",      tags=["聊天"])
-app.include_router(translate.router, prefix="/api/translate", tags=["翻译"])
+app.include_router(auth.router,       prefix="/api/auth",       tags=["认证"])
+app.include_router(users.router,      prefix="/api/users",      tags=["用户"])
+app.include_router(matching.router,   prefix="/api/matching",   tags=["匹配"])
+app.include_router(chat.router,       prefix="/api/chat",       tags=["聊天"])
+app.include_router(translate.router,  prefix="/api/translate",  tags=["翻译"])
+app.include_router(roommates.router,  prefix="/api/roommates",  tags=["锁定舍友"])
 
 @app.get("/")
 async def root():
