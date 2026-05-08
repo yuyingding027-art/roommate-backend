@@ -12,6 +12,7 @@ from matching_service import (
     compute_personality_score,
     compute_skills_label,
     compute_total_score,
+    _call_qwen,
 )
 import asyncio
 
@@ -22,115 +23,162 @@ def str_to_list(s: str) -> list:
     return [x for x in s.split(",") if x] if s else []
 
 
-# ─── 严格筛选（搜索框上方填空）───────────────────────────────────────────────
-import re
-
-# ─── 搜索词 → 硬筛选关键词映射 ───────────────────────────────────────────────
-DIET_MAP = {
-    "一起吃":   "together", "一起":     "together", "一块吃":   "together",
-    "各自":     "separate", "各自解决": "separate", "分开吃":   "separate",
-    "不一起":   "separate", "不一块":   "separate",
-    "外卖":     "takeout",  "点外卖":   "takeout",
-    "弹性饮食": "flexible", "饮食弹性": "flexible",
-}
-HABIT_MAP = {
-    "不抽烟": "no_smoking", "不吸烟": "no_smoking", "不烟": "no_smoking",
-    "抽烟":   "smoking",    "吸烟":   "smoking",
-    "有猫":   "pet",        "有狗":   "pet",   "有宠物": "pet",  "养宠物": "pet",
-    "不养宠物": "no_pet",   "没有宠物": "no_pet",
-    "爱干净": "clean_high", "整洁":   "clean_high", "干净": "clean_high",
-}
-SLEEP_MAP = {
-    "早睡": "early", "早起": "early",
-    "晚睡": "late",  "夜猫": "late",  "夜猫子": "late", "熬夜": "late",
-    "弹性作息": "flexible",
-}
-SKILL_MAP = {
-    "杀虫":   "杀虫", "杀虫子": "杀虫", "灭虫":  "杀虫",
-    "做饭":   "做饭", "烹饪":   "做饭",
-    "开车":   "开车", "有车":   "开车",
-    "修电脑": "修电脑", "调酒":  "调酒",
-}
-GENDER_MAP = {
-    "女": ["女", "female", "f"], "女性": ["女", "female", "f"], "女生": ["女", "female", "f"],
-    "男": ["男", "male",   "m"], "男性": ["男", "male",   "m"], "男生": ["男", "male",   "m"],
-}
-
-
-def parse_search_query(search_query: str) -> dict:
-    """
-    从自然语言搜索词解析硬筛选条件。
-    返回 filters dict，无法结构化的剩余词放入 soft_query 传给 AI。
-    """
-    if not search_query:
+# ══════════════════════════════════════════════════════════
+# AI 搜索词解析
+# ══════════════════════════════════════════════════════════
+async def parse_search_with_ai(search_query: str) -> dict:
+    """让 Qwen 把任意语言的搜索词转成结构化筛选条件"""
+    if not search_query or not search_query.strip():
         return {}
-    filters = {}
-    remaining = search_query
 
-    for kw, vals in GENDER_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters["gender"] = vals
+    prompt = f"""用户输入了舍友搜索词："{search_query}"
 
-    for kw, val in SLEEP_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters["sleep_habit"] = val
+请分析这段搜索词（可能是中文、英文、日语或韩语），提取出以下字段的筛选条件。
+如果搜索词没有提到某字段，对应值返回null或空数组。
 
-    for kw, val in DIET_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters["diet_habit"] = val
+字段说明：
+- gender: "male" | "female" | null
+- sleep_habit: "early" | "late" | "flexible" | null
+- diet_habit: "together"（一起吃）| "separate"（分开吃/各自）| "flexible" | null
+- habits_required: 0个或多个，从 ["smoking","no_smoking","pet","no_pet","clean_high","clean_mid","clean_low"] 选择
+- skills_keywords: 技能关键词列表（英文小写）
+- soft_query: 无法结构化的描述
 
-    for kw, val in HABIT_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters.setdefault("habits_required", [])
-            if val not in filters["habits_required"]:
-                filters["habits_required"].append(val)
+例子：
+- "一起吃饭" → {{"diet_habit":"together","gender":null,"sleep_habit":null,"habits_required":[],"skills_keywords":[],"soft_query":null}}
+- "eat together" → {{"diet_habit":"together","gender":null,"sleep_habit":null,"habits_required":[],"skills_keywords":[],"soft_query":null}}
+- "分开吃 不抽烟" → {{"diet_habit":"separate","habits_required":["no_smoking"],"gender":null,"sleep_habit":null,"skills_keywords":[],"soft_query":null}}
+- "non-smoker female night owl" → {{"gender":"female","sleep_habit":"late","habits_required":["no_smoking"],"diet_habit":null,"skills_keywords":[],"soft_query":null}}
 
-    for kw, val in SKILL_MAP.items():
-        if kw in remaining:
-            remaining = remaining.replace(kw, "")
-            filters.setdefault("skills_required", [])
-            if val not in filters["skills_required"]:
-                filters["skills_required"].append(val)
+只输出JSON，不输出任何其他内容："""
 
-    soft = re.sub(r"[，,、。\s]+", " ", remaining).strip()
-    if soft:
-        filters["soft_query"] = soft
-    return filters
+    data = await asyncio.to_thread(_call_qwen, prompt)
+    print(f"🔍 搜索词 '{search_query}' AI解析: {data}")
+    return data or {}
+
+
+# ══════════════════════════════════════════════════════════
+# 多语言值标准化对照表（关键 ★）
+# ══════════════════════════════════════════════════════════
+DIET_SYNONYMS = {
+    "together": [
+        "together", "一起吃", "一起", "一块吃", "一起吃饭", "一起用餐",
+        "eat together", "eat_together",
+        "一緒に食べる", "一緒",
+        "같이 먹음", "같이먹음", "함께",
+    ],
+    "separate": [
+        "separate", "各自", "各自解决", "分开吃", "各自吃", "不一起", "分开",
+        "eat separately", "eat_separately",
+        "別々", "各自で",
+        "따로", "따로 먹음", "따로먹음",
+    ],
+    "flexible": [
+        "flexible", "不一定", "随意", "都可以", "不固定", "看情况",
+        "不規則", "유동적", "상관없음",
+    ],
+}
+
+SLEEP_SYNONYMS = {
+    "early": [
+        "early", "早睡", "早起", "早睡早起",
+        "early bird", "early_bird",
+        "早起き", "朝型",
+        "일찍", "아침형",
+    ],
+    "late": [
+        "late", "晚睡", "夜猫", "夜猫子", "熬夜", "晚睡晚起",
+        "night owl", "night_owl",
+        "夜型", "夜更かし",
+        "늦게", "올빼미", "야행성",
+    ],
+    "flexible": [
+        "flexible", "弹性", "弹性作息", "不固定", "不规律",
+        "不規則", "유동적",
+    ],
+}
+
+GENDER_SYNONYMS = {
+    "female": [
+        "female", "女", "女性", "女生", "f", "girl", "woman",
+        "女の子",
+        "여성", "여자",
+    ],
+    "male": [
+        "male", "男", "男性", "男生", "m", "boy", "man",
+        "男の子",
+        "남성", "남자",
+    ],
+}
+
+
+def normalize_field(value: str, synonyms: dict) -> Optional[str]:
+    """把任意语言/写法的值标准化成 key（如 'together' / 'separate' / 'flexible'）"""
+    if not value:
+        return None
+    v = value.strip().lower()
+    for key, syns in synonyms.items():
+        if v in [s.lower() for s in syns]:
+            return key
+    return v
 
 
 def filter_by_search(all_profiles: list, filters: dict) -> list:
     """
-    根据 parse_search_query 解析出的条件严格过滤，AND 逻辑。
+    用 AI 解析出的标准 key 过滤候选人。
+    数据库里的值（任意语言）通过 normalize_field 标准化后再比对。
     """
     if not filters:
         return all_profiles
+
     result = []
     for p in all_profiles:
-        if "gender" in filters:
-            if not p.gender or p.gender.strip().lower() not in [g.lower() for g in filters["gender"]]:
+
+        # 性别
+        if filters.get("gender"):
+            if not p.gender:
                 continue
-        if "sleep_habit" in filters:
-            if (p.sleep_habit or "").strip() != filters["sleep_habit"]:
+            norm = normalize_field(p.gender, GENDER_SYNONYMS)
+            if norm != filters["gender"]:
                 continue
-        if "diet_habit" in filters:
-            if (p.diet_habit or "").strip() != filters["diet_habit"]:
+
+        # 作息
+        if filters.get("sleep_habit"):
+            if not p.sleep_habit:
                 continue
-        if "habits_required" in filters:
+            norm = normalize_field(p.sleep_habit, SLEEP_SYNONYMS)
+            if norm != filters["sleep_habit"]:
+                continue
+
+        # 饮食 ★
+        if filters.get("diet_habit"):
+            if not p.diet_habit:
+                continue
+            norm = normalize_field(p.diet_habit, DIET_SYNONYMS)
+            if norm != filters["diet_habit"]:
+                continue
+
+        # 生活习惯标签
+        if filters.get("habits_required"):
             ph = set((p.habits or "").split(","))
             if not set(filters["habits_required"]).issubset(ph):
                 continue
-        if "skills_required" in filters:
-            st = (p.special_skills or "").lower()
-            if not all(s.lower() in st for s in filters["skills_required"]):
+
+        # 技能关键词
+        if filters.get("skills_keywords"):
+            skills_text = (p.special_skills or "").lower()
+            bio_text    = (p.bio or "").lower()
+            combined    = skills_text + " " + bio_text
+            if not all(kw.lower() in combined for kw in filters["skills_keywords"]):
                 continue
+
         result.append(p)
     return result
 
 
+# ══════════════════════════════════════════════════════════
+# 搜索框上方填空的严格筛选
+# ══════════════════════════════════════════════════════════
 def hard_filter_profiles(
     all_profiles: list,
     study_country: Optional[str] = None,
@@ -139,10 +187,6 @@ def hard_filter_profiles(
     gender:        Optional[str] = None,
     language:      Optional[str] = None,
 ) -> list:
-    """
-    所有传入的非空字段都必须严格匹配（AND逻辑）。
-    空字段不筛选。
-    """
     result = []
     for p in all_profiles:
         if study_country:
@@ -163,15 +207,8 @@ def hard_filter_profiles(
         if gender:
             if not p.gender:
                 continue
-            # 支持中英文匹配
-            gender_map = {
-                "女": ["女", "female", "f"],
-                "男": ["男", "male", "m"],
-                "female": ["女", "female", "f"],
-                "male": ["男", "male", "m"],
-            }
-            allowed = gender_map.get(gender.lower(), [gender.lower()])
-            if p.gender.strip().lower() not in [g.lower() for g in allowed]:
+            norm = normalize_field(p.gender, GENDER_SYNONYMS)
+            if norm != normalize_field(gender, GENDER_SYNONYMS):
                 continue
         if language:
             if not p.native_language:
@@ -182,24 +219,23 @@ def hard_filter_profiles(
     return result
 
 
-# ─── 主路由 ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+# 主路由
+# ══════════════════════════════════════════════════════════
 @router.get("/", response_model=List[MatchResult])
 async def get_matches(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = 20,
     refresh: bool = False,
-    # ── 严格筛选参数（对应搜索框上方填空）──
     filter_study_country: Optional[str] = None,
     filter_school:        Optional[str] = None,
     filter_study_state:   Optional[str] = None,
     filter_gender:        Optional[str] = None,
     filter_language:      Optional[str] = None,
-    # ── 自定义权重（0-100整数，后端归一化）──
-    weight_objective:   Optional[int] = None,  # 默认30
-    weight_habits:      Optional[int] = None,  # 默认40
-    weight_personality: Optional[int] = None,  # 默认30
-    # ── 搜索词（传给AI做软匹配）──
+    weight_objective:   Optional[int] = None,
+    weight_habits:      Optional[int] = None,
+    weight_personality: Optional[int] = None,
     search_query: Optional[str] = None,
 ):
     result = await db.execute(
@@ -212,19 +248,18 @@ async def get_matches(
     all_result = await db.execute(
         select(UserProfile).where(
             UserProfile.user_id != current_user.id,
-            UserProfile.is_searchable == True,   # 只搜索档案可查询的用户
+            UserProfile.is_searchable == True,
         )
     )
     all_profiles = all_result.scalars().all()
     if not all_profiles:
         return []
 
-    # 批量查 email
     user_ids = [p.user_id for p in all_profiles]
     users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
     email_map: dict = {u.id: u.email for u in users_result.scalars().all()}
 
-    # 严格筛选（搜索框上方填空）
+    # 严格筛选
     has_filters = any([
         filter_study_country, filter_school, filter_study_state,
         filter_gender, filter_language,
@@ -243,15 +278,20 @@ async def get_matches(
     if has_filters and not candidates:
         return []
 
-    # 搜索词解析 → 硬筛选 + 软查询
-    search_filters = parse_search_query(search_query or "")
-    soft_query = search_filters.pop("soft_query", None)  # 剩余词传给 AI
-    if search_filters:
-        candidates = filter_by_search(candidates, search_filters)
-        if not candidates:
-            return []
+    # AI 搜索词解析 → 智能筛选
+    soft_query = None
+    if search_query and search_query.strip():
+        parsed = await parse_search_with_ai(search_query)
+        if parsed:
+            soft_query = parsed.pop("soft_query", None)
+            cleaned = {k: v for k, v in parsed.items() if v not in (None, [], "")}
+            if cleaned:
+                candidates = filter_by_search(candidates, cleaned)
+                print(f"🔍 筛选后剩 {len(candidates)} 人，条件={cleaned}")
+                if not candidates:
+                    return []
 
-    # 自定义权重（归一化到总和=1）
+    # 自定义权重
     custom_weights = None
     if any(w is not None for w in [weight_objective, weight_habits, weight_personality]):
         wo = weight_objective   if weight_objective   is not None else 30
@@ -264,20 +304,16 @@ async def get_matches(
             "personality": wp / total_w,
         }
 
-    # 有筛选/自定义权重/搜索词时强制刷新
     if has_filters or custom_weights or search_query:
         refresh = True
 
-    # 查出所有已有缓存（一次批量查询）
+    # 缓存
     cached_result = await db.execute(
         select(MatchScore).where(MatchScore.user_id == current_user.id)
     )
     cache_map: dict = {ms.target_user_id: ms for ms in cached_result.scalars().all()}
-
     my_version = getattr(my_profile, "profile_version", 1) or 1
 
-    # 无筛选/无搜索时，检查每个候选人的缓存版本
-    # 版本匹配 → 直接用缓存；版本不匹配或无缓存 → 重算
     if not refresh:
         all_from_cache = True
         for p in candidates:
@@ -285,36 +321,28 @@ async def get_matches(
             if not ms:
                 all_from_cache = False
                 break
-            # 检查 score_version 是否匹配
             expected_version = f"v{my_version}_{getattr(p, 'profile_version', 1) or 1}"
-            cached_version   = getattr(ms, "score_version", None)
-            if cached_version != expected_version:
+            if getattr(ms, "score_version", None) != expected_version:
                 all_from_cache = False
                 break
 
         if all_from_cache:
-            # 全部命中缓存，直接返回
-            cached_scores = sorted(cache_map.values(), key=lambda x: x.total_score, reverse=True)
-            # 只返回当前候选人范围内的
             candidate_ids = {p.user_id for p in candidates}
+            cached_scores = sorted(cache_map.values(), key=lambda x: x.total_score, reverse=True)
             cached_scores = [ms for ms in cached_scores if ms.target_user_id in candidate_ids][:limit]
             return await _build_match_results(cached_scores, db, email_map)
 
-    semaphore = asyncio.Semaphore(5)  # Qwen并发限制
-    # soft_query 在搜索词解析后定义，若无搜索词则为 None
-    if 'soft_query' not in dir():
-        soft_query = None  # 兜底，正常情况上面已定义
+    semaphore = asyncio.Semaphore(5)
 
     async def score_one(other: UserProfile):
         async with semaphore:
-            obj_score,  obj_reason  = await compute_objective_score(my_profile, other)
-            hab_score,  hab_reason  = await compute_habits_score(my_profile, other)
-            per_score,  per_reason  = await compute_personality_score(my_profile, other)
+            obj_score, obj_reason = await compute_objective_score(my_profile, other)
+            hab_score, hab_reason = await compute_habits_score(my_profile, other)
+            per_score, per_reason = await compute_personality_score(my_profile, other)
 
         skills_lbl = compute_skills_label(my_profile, other)
         total, weights = compute_total_score(obj_score, hab_score, per_score, custom_weights)
 
-        # 合并评语
         reason_parts = []
         if obj_reason: reason_parts.append(f"📍 客观：{obj_reason}")
         if hab_reason: reason_parts.append(f"🏠 习惯：{hab_reason}")
@@ -333,7 +361,6 @@ async def get_matches(
     results = await asyncio.gather(*tasks)
     valid   = sorted(results, key=lambda x: x[5], reverse=True)[:limit]
 
-    # 写缓存
     for row in valid:
         (other, obj_score, hab_score, per_score,
          skills_lbl, total, weights,
@@ -357,16 +384,14 @@ async def get_matches(
             "personality_score": p,
             "total_score":       total,
             "match_reason":      match_reason,
-            # 旧字段兼容
             "rule_score":        h,
             "ai_score":          o,
-            # 版本号：记录计算时两人的 profile_version
-            "score_version": f"v{my_version}_{getattr(other, 'profile_version', 1) or 1}",
+            "score_version":     f"v{my_version}_{getattr(other, 'profile_version', 1) or 1}",
         }
-        if hasattr(MatchScore, "skills_label"):   extra["skills_label"]   = skills_lbl
-        if hasattr(MatchScore, "score_weights"):  extra["score_weights"]  = json.dumps(weights)
-        if hasattr(MatchScore, "objective_reason"): extra["objective_reason"]   = obj_reason
-        if hasattr(MatchScore, "habits_reason"):    extra["habits_reason"]      = hab_reason
+        if hasattr(MatchScore, "skills_label"):       extra["skills_label"]       = skills_lbl
+        if hasattr(MatchScore, "score_weights"):      extra["score_weights"]      = json.dumps(weights)
+        if hasattr(MatchScore, "objective_reason"):   extra["objective_reason"]   = obj_reason
+        if hasattr(MatchScore, "habits_reason"):      extra["habits_reason"]      = hab_reason
         if hasattr(MatchScore, "personality_reason"): extra["personality_reason"] = per_reason
 
         if ms:
@@ -374,16 +399,12 @@ async def get_matches(
                 if hasattr(ms, k):
                     setattr(ms, k, v)
         else:
-            kwargs = {
-                "user_id":          current_user.id,
-                "target_user_id":   other.user_id,
-            }
+            kwargs = {"user_id": current_user.id, "target_user_id": other.user_id}
             kwargs.update({k: v for k, v in extra.items() if hasattr(MatchScore, k)})
             db.add(MatchScore(**kwargs))
 
     await db.commit()
 
-    # 构建返回
     match_results = []
     for row in valid:
         (other, obj_score, hab_score, per_score,
@@ -430,7 +451,6 @@ async def get_matches(
             objective_reason    = obj_reason,
             habits_reason       = hab_reason,
             personality_reason  = per_reason,
-            # 旧字段兼容
             rule_score          = round(h),
             ai_score            = round(o),
         ))
@@ -456,9 +476,9 @@ async def _build_match_results(cached_scores, db, email_map: dict = None):
             except Exception:
                 weights = {}
 
-        o = getattr(ms, "objective_score",   ms.ai_score   if hasattr(ms, "ai_score")   else 50.0)
-        h = getattr(ms, "habits_score",      ms.rule_score if hasattr(ms, "rule_score")  else 50.0)
-        p = getattr(ms, "personality_score", 50.0)
+        o  = getattr(ms, "objective_score",   getattr(ms, "ai_score",   50.0))
+        h  = getattr(ms, "habits_score",      getattr(ms, "rule_score", 50.0))
+        p  = getattr(ms, "personality_score", 50.0)
         sl = getattr(ms, "skills_label", None)
 
         results.append(MatchResult(
