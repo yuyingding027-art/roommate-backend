@@ -22,10 +22,13 @@ async def send_message(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
+    import json as _json
     msg = Message(
-        sender_id=current_user.id,
-        receiver_id=body.receiver_id,
-        content=body.content
+        sender_id    = current_user.id,
+        receiver_id  = body.receiver_id,
+        content      = body.content,
+        message_type = body.message_type if hasattr(body, "message_type") else "text",
+        message_meta = _json.dumps(body.message_meta) if hasattr(body, "message_meta") and body.message_meta else None,
     )
     db.add(msg)
     await db.commit()
@@ -36,15 +39,28 @@ async def send_message(
     if target_ws:
         try:
             await target_ws.send_json({
-                "type": "new_message",
-                "from": str(current_user.id),
-                "content": body.content,
-                "message_id": str(msg.id),
+                "type":         "new_message",
+                "from":         str(current_user.id),
+                "content":      body.content,
+                "message_id":   str(msg.id),
+                "message_type": msg.message_type,
+                "message_meta": msg.message_meta,
             })
         except Exception:
             pass
 
-    return msg
+    # MessageResponse 里 message_meta 是 dict，但数据库存的是 JSON 字符串，需要转换
+    resp = MessageResponse(
+        id           = msg.id,
+        sender_id    = msg.sender_id,
+        receiver_id  = msg.receiver_id,
+        content      = msg.content,
+        created_at   = msg.created_at,
+        is_read      = msg.is_read,
+        message_type = msg.message_type or "text",
+        message_meta = _json.loads(msg.message_meta) if msg.message_meta else None,
+    )
+    return resp
 
 @router.get("/history/{partner_id}", response_model=List[MessageResponse])
 async def get_history(
@@ -70,7 +86,20 @@ async def get_history(
             m.is_read = True
     await db.commit()
 
-    return messages
+    import json as _json
+    result_list = []
+    for m in messages:
+        result_list.append(MessageResponse(
+            id           = m.id,
+            sender_id    = m.sender_id,
+            receiver_id  = m.receiver_id,
+            content      = m.content,
+            created_at   = m.created_at,
+            is_read      = m.is_read,
+            message_type = m.message_type if hasattr(m, "message_type") and m.message_type else "text",
+            message_meta = _json.loads(m.message_meta) if hasattr(m, "message_meta") and m.message_meta else None,
+        ))
+    return result_list
 
 @router.get("/conversations", response_model=List[ConversationSummary])
 async def get_conversations(
