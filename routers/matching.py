@@ -23,6 +23,114 @@ def str_to_list(s: str) -> list:
 
 
 # ─── 严格筛选（搜索框上方填空）───────────────────────────────────────────────
+import re
+
+# ─── 搜索词 → 硬筛选关键词映射 ───────────────────────────────────────────────
+DIET_MAP = {
+    "一起吃":   "together", "一起":     "together", "一块吃":   "together",
+    "各自":     "separate", "各自解决": "separate", "分开吃":   "separate",
+    "不一起":   "separate", "不一块":   "separate",
+    "外卖":     "takeout",  "点外卖":   "takeout",
+    "弹性饮食": "flexible", "饮食弹性": "flexible",
+}
+HABIT_MAP = {
+    "不抽烟": "no_smoking", "不吸烟": "no_smoking", "不烟": "no_smoking",
+    "抽烟":   "smoking",    "吸烟":   "smoking",
+    "有猫":   "pet",        "有狗":   "pet",   "有宠物": "pet",  "养宠物": "pet",
+    "不养宠物": "no_pet",   "没有宠物": "no_pet",
+    "爱干净": "clean_high", "整洁":   "clean_high", "干净": "clean_high",
+}
+SLEEP_MAP = {
+    "早睡": "early", "早起": "early",
+    "晚睡": "late",  "夜猫": "late",  "夜猫子": "late", "熬夜": "late",
+    "弹性作息": "flexible",
+}
+SKILL_MAP = {
+    "杀虫":   "杀虫", "杀虫子": "杀虫", "灭虫":  "杀虫",
+    "做饭":   "做饭", "烹饪":   "做饭",
+    "开车":   "开车", "有车":   "开车",
+    "修电脑": "修电脑", "调酒":  "调酒",
+}
+GENDER_MAP = {
+    "女": ["女", "female", "f"], "女性": ["女", "female", "f"], "女生": ["女", "female", "f"],
+    "男": ["男", "male",   "m"], "男性": ["男", "male",   "m"], "男生": ["男", "male",   "m"],
+}
+
+
+def parse_search_query(search_query: str) -> dict:
+    """
+    从自然语言搜索词解析硬筛选条件。
+    返回 filters dict，无法结构化的剩余词放入 soft_query 传给 AI。
+    """
+    if not search_query:
+        return {}
+    filters = {}
+    remaining = search_query
+
+    for kw, vals in GENDER_MAP.items():
+        if kw in remaining:
+            remaining = remaining.replace(kw, "")
+            filters["gender"] = vals
+
+    for kw, val in SLEEP_MAP.items():
+        if kw in remaining:
+            remaining = remaining.replace(kw, "")
+            filters["sleep_habit"] = val
+
+    for kw, val in DIET_MAP.items():
+        if kw in remaining:
+            remaining = remaining.replace(kw, "")
+            filters["diet_habit"] = val
+
+    for kw, val in HABIT_MAP.items():
+        if kw in remaining:
+            remaining = remaining.replace(kw, "")
+            filters.setdefault("habits_required", [])
+            if val not in filters["habits_required"]:
+                filters["habits_required"].append(val)
+
+    for kw, val in SKILL_MAP.items():
+        if kw in remaining:
+            remaining = remaining.replace(kw, "")
+            filters.setdefault("skills_required", [])
+            if val not in filters["skills_required"]:
+                filters["skills_required"].append(val)
+
+    soft = re.sub(r"[，,、。\s]+", " ", remaining).strip()
+    if soft:
+        filters["soft_query"] = soft
+    return filters
+
+
+def filter_by_search(all_profiles: list, filters: dict) -> list:
+    """
+    根据 parse_search_query 解析出的条件严格过滤，AND 逻辑。
+    """
+    if not filters:
+        return all_profiles
+    result = []
+    for p in all_profiles:
+        if "gender" in filters:
+            if not p.gender or p.gender.strip().lower() not in [g.lower() for g in filters["gender"]]:
+                continue
+        if "sleep_habit" in filters:
+            if (p.sleep_habit or "").strip() != filters["sleep_habit"]:
+                continue
+        if "diet_habit" in filters:
+            if (p.diet_habit or "").strip() != filters["diet_habit"]:
+                continue
+        if "habits_required" in filters:
+            ph = set((p.habits or "").split(","))
+            if not set(filters["habits_required"]).issubset(ph):
+                continue
+        if "skills_required" in filters:
+            st = (p.special_skills or "").lower()
+            if not all(s.lower() in st for s in filters["skills_required"]):
+                continue
+        result.append(p)
+    return result
+
+
 def hard_filter_profiles(
     all_profiles: list,
     study_country: Optional[str] = None,
@@ -113,7 +221,7 @@ async def get_matches(
     users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
     email_map: dict = {u.id: u.email for u in users_result.scalars().all()}
 
-    # 严格筛选
+    # 严格筛选（搜索框上方填空）
     has_filters = any([
         filter_study_country, filter_school, filter_study_state,
         filter_gender, filter_language,
@@ -131,6 +239,14 @@ async def get_matches(
     )
     if has_filters and not candidates:
         return []
+
+    # 搜索词解析 → 硬筛选 + 软查询
+    search_filters = parse_search_query(search_query or "")
+    soft_query = search_filters.pop("soft_query", None)  # 剩余词传给 AI
+    if search_filters:
+        candidates = filter_by_search(candidates, search_filters)
+        if not candidates:
+            return []
 
     # 自定义权重（归一化到总和=1）
     custom_weights = None
@@ -162,6 +278,9 @@ async def get_matches(
             return await _build_match_results(cached_scores, db, email_map)
 
     semaphore = asyncio.Semaphore(5)  # Qwen并发限制
+    # soft_query 在搜索词解析后定义，若无搜索词则为 None
+    if 'soft_query' not in dir():
+        soft_query = None  # 兜底，正常情况上面已定义
 
     async def score_one(other: UserProfile):
         async with semaphore:
