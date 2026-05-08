@@ -19,7 +19,7 @@ def profile_to_dict(profile: UserProfile, email: str = None) -> dict:
     d["special_skills"] = str_to_list(d.get("special_skills") or "")
     d["habits"]         = str_to_list(d.get("habits") or "")
     d["room_types"]     = str_to_list(d.get("room_types") or "")
-    d["email"]          = email  # None 也可以，前端判断是否展示
+    d["email"]          = email
     return d
 
 
@@ -40,9 +40,13 @@ async def create_or_update_profile(
     data["room_types"]     = list_to_str(data.get("room_types") or [])
 
     if profile:
+        # profile 有变化时递增版本号，触发匹配分数缓存失效
+        current_version = getattr(profile, "profile_version", 1) or 1
+        data["profile_version"] = current_version + 1
         for k, v in data.items():
             setattr(profile, k, v)
     else:
+        data["profile_version"] = 1
         profile = UserProfile(user_id=current_user.id, **data)
         db.add(profile)
 
@@ -73,10 +77,35 @@ async def get_user_profile(user_id: str, db: AsyncSession = Depends(get_db)):
     profile = result.scalar_one_or_none()
     if not profile:
         raise HTTPException(status_code=404, detail="用户不存在")
-
-    # 同时查出该用户的 email
-    user_result = await db.execute(
-        select(User).where(User.id == profile.user_id)
-    )
+    user_result = await db.execute(select(User).where(User.id == profile.user_id))
     user = user_result.scalar_one_or_none()
     return profile_to_dict(profile, email=user.email if user else None)
+
+
+# ── 撤销 / 恢复可查询档案 ──────────────────────────────────────────────────────
+@router.post("/profile/searchable")
+async def toggle_searchable(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    切换当前用户的档案可查询状态。
+    撤销：is_searchable=False，匹配搜索中不再出现
+    恢复：is_searchable=True，重新出现在搜索中
+    返回新状态。
+    """
+    result = await db.execute(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="请先完善个人资料")
+
+    current_state = getattr(profile, "is_searchable", True)
+    profile.is_searchable = not current_state
+    await db.commit()
+
+    return {
+        "is_searchable": profile.is_searchable,
+        "message": "档案已恢复，可以被其他用户搜索到" if profile.is_searchable else "档案已撤销，其他用户将无法在匹配中看到你",
+    }
