@@ -54,14 +54,14 @@ class UserProfile(Base):
     # 基本信息
     name = Column(String(100), nullable=False)
     gender = Column(String(10), nullable=False)
-    nationality = Column(String(100), nullable=True)      # 国籍
-    study_country = Column(String(100), nullable=True)    # 留学国家
-    study_state = Column(String(100), nullable=True)      # 州/省
+    nationality = Column(String(100), nullable=True)
+    study_country = Column(String(100), nullable=True)
+    study_state = Column(String(100), nullable=True)
     city = Column(String(100), nullable=False)
-    native_language = Column(String(50), nullable=True)   # 母语
+    native_language = Column(String(50), nullable=True)
     school = Column(String(200), nullable=False)
-    degree = Column(String(20), nullable=True)            # bachelor/master/phd
-    major = Column(String(100), nullable=True)            # 专业
+    degree = Column(String(20), nullable=True)
+    major = Column(String(100), nullable=True)
     avatar_url = Column(String(500), nullable=True)
 
     # 性格标签
@@ -72,13 +72,13 @@ class UserProfile(Base):
     sleep_habit = Column(String(20), nullable=False)
     diet_habit = Column(String(20), nullable=False)
     food_preference = Column(String(50), nullable=True)
-    habits = Column(String(500), nullable=True)           # 逗号分隔：smoking,no_smoking,pet,no_pet,car,no_car,clean_high,clean_mid,clean_low
+    habits = Column(String(500), nullable=True)
 
     # 租房
-    budget_currency = Column(String(10), nullable=True)   # USD/CNY/GBP/JPY等
-    budget_max = Column(Integer, nullable=True)           # 只保留最高预算
-    budget_min = Column(Integer, nullable=True)           # 保留兼容性
-    room_types = Column(String(100), nullable=True)       # 逗号分隔：2b1b,2b2b,3b2b,homestay
+    budget_currency = Column(String(10), nullable=True)
+    budget_max = Column(Integer, nullable=True)
+    budget_min = Column(Integer, nullable=True)
+    room_types = Column(String(100), nullable=True)
 
     # 经历
     roommate_experience = Column(Integer, default=0)
@@ -90,9 +90,19 @@ class UserProfile(Base):
     bio = Column(Text, nullable=True)
     profile_summary = Column(Text, nullable=True)
 
+    # ── 新增：档案可查询状态 ──────────────────────────────
+    # True = 正常出现在匹配搜索中（默认）
+    # False = 撤销档案，不出现在搜索中，但内容保留
+    is_searchable = Column(Boolean, default=True, nullable=False)
+
+    # ── 新增：评分版本号（用于缓存失效）──────────────────
+    # 每次 profile 更新时 +1，matching 检测到版本不同则重算
+    profile_version = Column(Integer, default=1, nullable=False)
+
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="profile")
+
 
 class MatchScore(Base):
     __tablename__ = "match_scores"
@@ -101,24 +111,48 @@ class MatchScore(Base):
     user_id          = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     target_user_id   = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
-    # ── 旧字段（保留兼容）──────────────────────────────────
+    # 旧字段兼容
     rule_score        = Column(Float, default=0.0)
     ai_score          = Column(Float, default=0.0)
     personality_score = Column(Float, default=0.0)
     total_score       = Column(Float, default=0.0)
     match_reason      = Column(Text, nullable=True)
 
-    # ── 新增：5维度独立分数 ────────────────────────────────
-    habits_score      = Column(Float, default=0.0)   # 生活习惯 25%
-    objective_score   = Column(Float, default=0.0)   # 客观信息 25%
-    skills_score      = Column(Float, default=0.0)   # 技能     20%
-    interest_score    = Column(Float, default=0.0)   # 兴趣爱好 15%
-    # personality_score 复用旧字段（性格 15%）
-
-    # ── 实际使用权重（JSON字符串）─────────────────────────
+    # 三维度分数
+    habits_score      = Column(Float, default=0.0)
+    objective_score   = Column(Float, default=0.0)
+    skills_score      = Column(Float, default=0.0)
+    interest_score    = Column(Float, default=0.0)
     score_weights     = Column(Text, nullable=True)
 
+    # 分维度评语
+    objective_reason   = Column(Text, nullable=True)
+    habits_reason      = Column(Text, nullable=True)
+    personality_reason = Column(Text, nullable=True)
+    skills_label       = Column(String(20), nullable=True)
+
+    # ── 新增：记录计算时两人的 profile_version ────────────
+    # 格式："v{user_version}_{target_version}"，如 "v2_3"
+    # 任一版本变化则缓存失效，重新计算
+    score_version      = Column(String(20), nullable=True)
+
     computed_at       = Column(DateTime, default=datetime.utcnow)
+
+
+class RoommateMatch(Base):
+    """锁定舍友关系表"""
+    __tablename__ = "roommate_matches"
+
+    id             = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    requester_id   = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    receiver_id    = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+
+    # pending / accepted / rejected / considering
+    status         = Column(String(20), default="pending", nullable=False)
+
+    created_at     = Column(DateTime, default=datetime.utcnow)
+    updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class Message(Base):
     __tablename__ = "messages"
@@ -132,8 +166,15 @@ class Message(Base):
     contact_type = Column(String(20), nullable=True)
     contact_value = Column(String(100), nullable=True)
 
+    # ── 新增：消息类型，用于锁定舍友邀请卡片 ─────────────
+    # "text" | "roommate_invite" | "roommate_response"
+    message_type   = Column(String(30), default="text", nullable=False)
+    # 邀请相关的元数据（JSON字符串）
+    message_meta   = Column(Text, nullable=True)
+
     sender = relationship("User", foreign_keys=[sender_id], back_populates="sent_messages")
     receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_messages")
+
 
 async def get_db():
     async with AsyncSessionLocal() as session:
