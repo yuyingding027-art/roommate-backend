@@ -210,7 +210,10 @@ async def get_matches(
         raise HTTPException(status_code=400, detail="请先完善个人资料")
 
     all_result = await db.execute(
-        select(UserProfile).where(UserProfile.user_id != current_user.id)
+        select(UserProfile).where(
+            UserProfile.user_id != current_user.id,
+            UserProfile.is_searchable == True,   # 只搜索档案可查询的用户
+        )
     )
     all_profiles = all_result.scalars().all()
     if not all_profiles:
@@ -265,16 +268,36 @@ async def get_matches(
     if has_filters or custom_weights or search_query:
         refresh = True
 
-    # 缓存命中（无任何筛选时）
+    # 查出所有已有缓存（一次批量查询）
+    cached_result = await db.execute(
+        select(MatchScore).where(MatchScore.user_id == current_user.id)
+    )
+    cache_map: dict = {ms.target_user_id: ms for ms in cached_result.scalars().all()}
+
+    my_version = getattr(my_profile, "profile_version", 1) or 1
+
+    # 无筛选/无搜索时，检查每个候选人的缓存版本
+    # 版本匹配 → 直接用缓存；版本不匹配或无缓存 → 重算
     if not refresh:
-        cached = await db.execute(
-            select(MatchScore)
-            .where(MatchScore.user_id == current_user.id)
-            .order_by(MatchScore.total_score.desc())
-            .limit(limit)
-        )
-        cached_scores = cached.scalars().all()
-        if len(cached_scores) == len(all_profiles):
+        all_from_cache = True
+        for p in candidates:
+            ms = cache_map.get(p.user_id)
+            if not ms:
+                all_from_cache = False
+                break
+            # 检查 score_version 是否匹配
+            expected_version = f"v{my_version}_{getattr(p, 'profile_version', 1) or 1}"
+            cached_version   = getattr(ms, "score_version", None)
+            if cached_version != expected_version:
+                all_from_cache = False
+                break
+
+        if all_from_cache:
+            # 全部命中缓存，直接返回
+            cached_scores = sorted(cache_map.values(), key=lambda x: x.total_score, reverse=True)
+            # 只返回当前候选人范围内的
+            candidate_ids = {p.user_id for p in candidates}
+            cached_scores = [ms for ms in cached_scores if ms.target_user_id in candidate_ids][:limit]
             return await _build_match_results(cached_scores, db, email_map)
 
     semaphore = asyncio.Semaphore(5)  # Qwen并发限制
@@ -337,6 +360,8 @@ async def get_matches(
             # 旧字段兼容
             "rule_score":        h,
             "ai_score":          o,
+            # 版本号：记录计算时两人的 profile_version
+            "score_version": f"v{my_version}_{getattr(other, 'profile_version', 1) or 1}",
         }
         if hasattr(MatchScore, "skills_label"):   extra["skills_label"]   = skills_lbl
         if hasattr(MatchScore, "score_weights"):  extra["score_weights"]  = json.dumps(weights)
