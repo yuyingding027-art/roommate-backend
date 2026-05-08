@@ -10,7 +10,12 @@ async def lifespan(app: FastAPI):
     await create_tables()
     yield
 
-app = FastAPI(title="留学生找舍友平台 API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="留学生找舍友平台 API",
+    version="1.0.0",
+    lifespan=lifespan,
+    redirect_slashes=False,   # ← 加这一行
+)
 
 app.add_middleware(
     CORSMiddleware,
