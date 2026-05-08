@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime
 
@@ -36,20 +36,16 @@ class ProfileCreate(BaseModel):
     degree: Optional[str] = None
     major: Optional[str] = None
     avatar_url: Optional[str] = None
-
     zodiac: Optional[str] = None
     mbti: Optional[str] = None
-
     sleep_habit: str
     diet_habit: str
     food_preference: Optional[str] = None
     habits: Optional[List[str]] = []
-
     budget_currency: Optional[str] = None
     budget_max: Optional[int] = None
     budget_min: Optional[int] = None
     room_types: Optional[List[str]] = []
-
     roommate_experience: int = Field(default=0, ge=0, le=5)
     special_skills: Optional[List[str]] = []
     bio: Optional[str] = None
@@ -58,6 +54,8 @@ class ProfileResponse(ProfileCreate):
     user_id: UUID
     email: Optional[str] = None
     profile_summary: Optional[str] = None
+    is_searchable: bool = True
+    profile_version: int = 1
     updated_at: Optional[datetime] = None
     model_config = {"from_attributes": True}
 
@@ -89,36 +87,32 @@ class MatchResult(BaseModel):
     avatar_url: Optional[str]
     email: Optional[str] = None
 
-    # ── 三维度分数 ──────────────────────────────────────
     total_score:       float = 0.0
-    objective_score:   float = 0.0   # 客观信息 30%
-    habits_score:      float = 0.0   # 生活习惯 40%
-    personality_score: float = 0.0   # 性格兴趣 30%（原personality+interest合并）
+    objective_score:   float = 0.0
+    habits_score:      float = 0.0
+    personality_score: float = 0.0
+    skills_label:      Optional[str] = None
+    score_weights:     Optional[Dict[str, float]] = None
 
-    # ── 技能标签（不参与评分）──────────────────────────
-    skills_label: Optional[str] = None  # "相同" | "互补" | None
+    match_reason:        Optional[str] = None
+    objective_reason:    Optional[str] = None
+    habits_reason:       Optional[str] = None
+    personality_reason:  Optional[str] = None
 
-    # ── 实际使用权重 ────────────────────────────────────
-    score_weights: Optional[Dict[str, float]] = None
-
-    # ── AI 评语 ─────────────────────────────────────────
-    match_reason:        Optional[str] = None  # 综合评语
-    objective_reason:    Optional[str] = None  # 客观维度说明
-    habits_reason:       Optional[str] = None  # 习惯维度说明
-    personality_reason:  Optional[str] = None  # 性格兴趣维度说明
-
-    # ── 旧字段保留兼容（前端旧代码不报错）──────────────
-    rule_score:    float = 0.0
-    ai_score:      float = 0.0
-    skills_score:  float = 0.0
-    interest_score: float = 0.0
-    match_points:   Optional[List[str]] = None
+    # 旧字段兼容
+    rule_score:      float = 0.0
+    ai_score:        float = 0.0
+    skills_score:    float = 0.0
+    interest_score:  float = 0.0
+    match_points:    Optional[List[str]] = None
     mismatch_points: Optional[List[str]] = None
 
 # ─── Chat ────────────────────────────────────────────────
 class MessageSend(BaseModel):
     receiver_id: UUID
     content: str
+    message_type: str = "text"
+    message_meta: Optional[Dict[str, Any]] = None
 
 class MessageResponse(BaseModel):
     id: UUID
@@ -127,6 +121,8 @@ class MessageResponse(BaseModel):
     content: str
     created_at: datetime
     is_read: bool
+    message_type: str = "text"
+    message_meta: Optional[Dict[str, Any]] = None
     model_config = {"from_attributes": True}
 
 class ShareContact(BaseModel):
@@ -141,3 +137,28 @@ class ConversationSummary(BaseModel):
     last_message: str
     last_message_time: datetime
     unread_count: int
+
+# ─── 锁定舍友 ────────────────────────────────────────────
+class RoommateInviteRequest(BaseModel):
+    receiver_id: UUID   # 邀请对象
+
+class RoommateInviteResponse(BaseModel):
+    invite_id: UUID
+    status: str         # pending / accepted / rejected / considering
+
+class RoommateRespondRequest(BaseModel):
+    invite_id: UUID
+    response: str       # "accepted" | "rejected" | "considering"
+
+class RoommateMatchInfo(BaseModel):
+    id: UUID
+    partner_id: UUID
+    partner_name: str
+    partner_avatar: Optional[str]
+    status: str
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+class LockedRoommatesResponse(BaseModel):
+    count: int
+    roommates: List[RoommateMatchInfo]
