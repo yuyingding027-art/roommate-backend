@@ -99,7 +99,7 @@ class MatchResult(BaseModel):
     habits_reason:       Optional[str] = None
     personality_reason:  Optional[str] = None
 
-    # 旧字段兼容
+    # previous name compatibility
     rule_score:      float = 0.0
     ai_score:        float = 0.0
     skills_score:    float = 0.0
@@ -138,9 +138,9 @@ class ConversationSummary(BaseModel):
     last_message_time: datetime
     unread_count: int
 
-# ─── 锁定舍友 ────────────────────────────────────────────
+# ───lock roommates 锁定舍友 ────────────────────────────────────────────
 class RoommateInviteRequest(BaseModel):
-    receiver_id: UUID   # 邀请对象
+    receiver_id: UUID   # 邀请对象 invitation
 
 class RoommateInviteResponse(BaseModel):
     invite_id: UUID
