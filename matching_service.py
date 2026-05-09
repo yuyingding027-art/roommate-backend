@@ -1,17 +1,17 @@
 """
-匹配核心逻辑 v5
+Matching engine v5
 ══════════════════════════════════════════════════════════
-改动说明：
-  1. 新增 BASELINE_MODE 环境变量开关
-  2. compute_objective_score 新增不匹配原因输出
-  3. compute_personality_score 仅考虑兴趣/性格/MBTI/星座，
-     明确排除生活习惯，缺失信息直接说明并扣分
-  4. （前端改动）饮食习惯标签展示 + 卡片展开不超屏
+Changelog:
+  1. Added BASELINE_MODE env var to disable all AI calls
+  2. compute_objective_score now also outputs mismatch reasons
+  3. compute_personality_score considers only personality/interests/MBTI/zodiac;
+     explicitly excludes lifestyle habits; missing info is called out and penalized
+  4. (Frontend) Diet habit tag display + expanded card no longer overflows screen
 
-默认权重：
-  objective_score   客观信息   30%
-  habits_score      生活习惯   40%
-  personality_score 性格兴趣   30%
+Default weights:
+  objective_score       Objective info       30%
+  habits_score          Lifestyle habits     40%
+  personality_score     Personality+interests 30%
 ══════════════════════════════════════════════════════════
 """
 
@@ -21,12 +21,12 @@ import asyncio
 from openai import OpenAI
 from database import UserProfile
 
-# ── Baseline 模式开关 ─────────────────────────────────────
-# Railway Variables 里设置 BASELINE_MODE=true 即可切换
-# 不设置或设置为 false 则使用正常 AI 模式
+# ── Baseline mode switch ──────────────────────────────────
+# Set BASELINE_MODE=true in Railway Variables to enable.
+# When false (default), the system uses normal AI mode.
 BASELINE_MODE = os.getenv("BASELINE_MODE", "false").lower() == "true"
 
-# ── Qwen 客户端 ───────────────────────────────────────────
+# ── Qwen client ───────────────────────────────────────────
 qwen_client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url="https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1",
@@ -45,10 +45,10 @@ def str_to_list(s: str) -> list:
 
 
 def _call_qwen(prompt: str) -> dict:
-    """同步调用 Qwen，返回解析后的 dict，失败返回 {}"""
+    """Synchronously call Qwen, return parsed dict; return {} on failure."""
     api_key = os.getenv("DASHSCOPE_API_KEY")
     if not api_key:
-        print("❌ DASHSCOPE_API_KEY 未设置")
+        print("❌ DASHSCOPE_API_KEY not set")
         return {}
     try:
         resp = qwen_client.chat.completions.create(
@@ -61,22 +61,22 @@ def _call_qwen(prompt: str) -> dict:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            print(f"❌ JSON解析失败，原文: {text[:200]}")
+            print(f"❌ JSON parse failed, raw: {text[:200]}")
             return {}
     except Exception as e:
-        print(f"❌ Qwen调用失败: {type(e).__name__}: {e}")
+        print(f"❌ Qwen call failed: {type(e).__name__}: {e}")
         return {}
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 1：客观信息
+# Dimension 1: Objective info
 # ══════════════════════════════════════════════════════════
 async def compute_objective_score(
     me: UserProfile, other: UserProfile
 ) -> tuple[float | None, str | None]:
     """
-    结构化规则（95分上限） + bio轻量AI（+5）
-    新增：不匹配的地方也输出原因
+    Structured rules (95-point cap) + lightweight bio AI (+5).
+    Also outputs mismatch reasons.
     """
     has_data = any([
         me.school, me.major, me.study_country, me.study_state,
@@ -86,10 +86,10 @@ async def compute_objective_score(
         return None, None
 
     score = 0.0
-    match_reasons = []    # 匹配的点
-    mismatch_reasons = [] # 不匹配的点
+    match_reasons = []     # matching points
+    mismatch_reasons = []  # mismatching points
 
-    # ── 留学国家 +14.25 ──────────────────────────────────
+    # ── Study country +14.25 ─────────────────────────────
     if me.study_country and other.study_country:
         if me.study_country.strip().lower() == other.study_country.strip().lower():
             score += 14.25
@@ -99,7 +99,7 @@ async def compute_objective_score(
     elif me.study_country and not other.study_country:
         mismatch_reasons.append("对方未填写留学国家")
 
-    # ── 校区/州 +14.25 ───────────────────────────────────
+    # ── Campus / state +14.25 ────────────────────────────
     if me.study_state and other.study_state:
         if me.study_state.strip().lower() == other.study_state.strip().lower():
             score += 14.25
@@ -107,13 +107,13 @@ async def compute_objective_score(
         else:
             mismatch_reasons.append(f"校区/州不同（{me.study_state} vs {other.study_state}）")
 
-    # ── 校区城市 +14.25 ──────────────────────────────────
+    # ── City +14.25 ──────────────────────────────────────
     if me.city and other.city:
         if me.city.strip().lower() == other.city.strip().lower():
             score += 14.25
             match_reasons.append(f"同城市{me.city}")
         else:
-            # 同国但不同城市，给个说明
+            # Same country but different city — note this explicitly
             same_country = (
                 me.study_country and other.study_country and
                 me.study_country.strip().lower() == other.study_country.strip().lower()
@@ -123,7 +123,7 @@ async def compute_objective_score(
             else:
                 mismatch_reasons.append(f"城市不同（{me.city} vs {other.city}）")
 
-    # ── 母语 +14.25 ──────────────────────────────────────
+    # ── Native language +14.25 ───────────────────────────
     if me.native_language and other.native_language:
         if me.native_language.strip().lower() == other.native_language.strip().lower():
             score += 14.25
@@ -131,7 +131,7 @@ async def compute_objective_score(
         else:
             mismatch_reasons.append(f"母语不同（{me.native_language} vs {other.native_language}）")
 
-    # ── 学校 +9.5 ────────────────────────────────────────
+    # ── School +9.5 ──────────────────────────────────────
     if me.school and other.school:
         if me.school.strip().lower() == other.school.strip().lower():
             score += 9.5
@@ -139,7 +139,7 @@ async def compute_objective_score(
         else:
             mismatch_reasons.append(f"学校不同（{me.school} vs {other.school}）")
 
-    # ── 专业 +4.75 ───────────────────────────────────────
+    # ── Major +4.75 ──────────────────────────────────────
     if me.major and other.major:
         if me.major.strip().lower() == other.major.strip().lower():
             score += 4.75
@@ -147,13 +147,13 @@ async def compute_objective_score(
         else:
             mismatch_reasons.append(f"专业不同（{me.major} vs {other.major}）")
 
-    # ── 国籍 +4.75 ───────────────────────────────────────
+    # ── Nationality +4.75 ────────────────────────────────
     if me.nationality and other.nationality:
         if me.nationality.strip().lower() == other.nationality.strip().lower():
             score += 4.75
             match_reasons.append(f"同国籍（{me.nationality}）")
 
-    # ── 预算 最高+19 ─────────────────────────────────────
+    # ── Budget, max +19 ──────────────────────────────────
     my_max  = me.budget_max  or 0
     oth_max = other.budget_max or 0
     if my_max > 0 and oth_max > 0:
@@ -167,9 +167,19 @@ async def compute_objective_score(
         else:
             mismatch_reasons.append(f"预算差距较大（{me.budget_max} vs {oth_max} {me.budget_currency or ''}）")
 
-    # ── bio 客观共同点 最高+5（轻量AI）──────────────────
+    # ── Bio shared traits, max +5 (lightweight AI) ───────
     bio_score = 0
     if me.bio and other.bio and not BASELINE_MODE:
+        # System prompt — kept in Chinese to match the model's training distribution.
+        # English translation:
+        # "You are an information extraction assistant. Compare the two personal
+        #  introductions and find shared OBJECTIVE traits, limited to: same
+        #  hometown city, same hometown province, same undergraduate institution,
+        #  same undergraduate major, same relationship status (single / in a
+        #  relationship). Each shared trait scores 1 point, max 5. Zero traits
+        #  found = 0. Do not deduct for mismatches.
+        #  Output JSON only:
+        #  {'score': 2, 'matches': ['both from Guangdong', 'both single']}"
         bio_prompt = (
             "你是一个信息提取助手。请对比以下两段个人介绍，"
             "找出客观信息上的共同点（仅限：老家同城市、老家同省份、"
@@ -191,7 +201,7 @@ async def compute_objective_score(
     score += bio_score
     final = min(round(score), 100)
 
-    # 组合原因：先说匹配点，再说不匹配点
+    # Compose reason string: matches first, then mismatches
     reason_parts = []
     if match_reasons:
         reason_parts.append("✅ " + "；".join(match_reasons))
@@ -203,7 +213,7 @@ async def compute_objective_score(
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 2：生活习惯
+# Dimension 2: Lifestyle habits
 # ══════════════════════════════════════════════════════════
 async def compute_habits_score(
     me: UserProfile, other: UserProfile
@@ -212,7 +222,7 @@ async def compute_habits_score(
     if not has_data:
         return None, None
 
-    # ── BASELINE MODE ────────────────────────────────────
+    # ── BASELINE MODE: pure rules, no AI ─────────────────
     if BASELINE_MODE:
         score = 0.0
         if me.sleep_habit and other.sleep_habit:
@@ -229,6 +239,22 @@ async def compute_habits_score(
     my_habits  = str_to_list(me.habits  or "")
     oth_habits = str_to_list(other.habits or "")
 
+    # System prompt — kept in Chinese.
+    # English translation:
+    # "You are an expert at matching international-student roommates. Given the
+    #  lifestyle info of two students, evaluate their compatibility as roommates.
+    #  Dimensions (high to low importance):
+    #   1. Sleep schedule (early/late) — most impactful conflict source
+    #   2. Lifestyle tags (smoking, pets, cleanliness) — large deduction on conflict
+    #   3. Diet (eat together / separately / takeout) — large deduction on mismatch
+    #   4. Lifestyle descriptions in the bio (sleep, hygiene, pets, guests, etc.)
+    #  Hard rules:
+    #   - smoker vs non-smoker     → severe conflict (-30+)
+    #   - pet vs no-pet            → severe conflict (-25+)
+    #   - very clean vs not-clean  → severe conflict (-20+)
+    #   - sleep schedule differs by 3+ hours → clear conflict (-15+)
+    #  Score 0-100, near 100 if highly similar with no conflicts, near 0 if severe.
+    #  Output JSON only: {'score': 75, 'reason': 'one sentence summary'}"
     prompt = f"""你是留学生舍友匹配专家。请根据以下两位同学的生活习惯信息，评估他们作为舍友的生活习惯契合程度。
 
 评估维度（重要性从高到低）：
@@ -266,7 +292,8 @@ B的生活习惯：
 
 
 # ══════════════════════════════════════════════════════════
-# 维度 3：性格兴趣（仅考虑性格/兴趣/MBTI/星座，不考虑生活习惯）
+# Dimension 3: Personality + interests
+# (Only personality / interests / MBTI / zodiac — NOT lifestyle habits)
 # ══════════════════════════════════════════════════════════
 async def compute_personality_score(
     me: UserProfile, other: UserProfile
@@ -275,14 +302,14 @@ async def compute_personality_score(
     if not has_data:
         return None, None
 
-    # ── BASELINE MODE ────────────────────────────────────
+    # ── BASELINE MODE: only exact MBTI match ─────────────
     if BASELINE_MODE:
-        score = 50.0  # 无AI时给中性分
+        score = 50.0  # neutral score when AI is off
         if me.mbti and other.mbti:
             score = 80.0 if me.mbti == other.mbti else 50.0
         return score, "（Baseline模式：仅MBTI精确匹配）"
 
-    # 预先检查缺失信息，让AI在prompt里知道
+    # Pre-check missing info; surface it inside the prompt
     missing_me    = [f for f, v in [("MBTI", me.mbti), ("星座", me.zodiac)] if not v]
     missing_other = [f for f, v in [("MBTI", other.mbti), ("星座", other.zodiac)] if not v]
     missing_note  = ""
@@ -291,6 +318,34 @@ async def compute_personality_score(
     if missing_other:
         missing_note += f"注意：B未填写{'/'.join(missing_other)}。"
 
+    # System prompt — kept in Chinese.
+    # English translation:
+    # "You are an expert at matching international-student roommates, familiar
+    #  with established MBTI compatibility research and zodiac personality
+    #  analysis. Evaluate the personality + interests compatibility of two
+    #  students.
+    #  Important constraints:
+    #   - This dimension ONLY evaluates personality, interests, MBTI, zodiac
+    #   - Do NOT consider sleep, hygiene, diet, pets, or other lifestyle habits
+    #     (those belong to a separate dimension)
+    #   - From the bios, extract only personality and interest content; ignore
+    #     lifestyle-related content
+    #  Dimensions:
+    #   1. MBTI compatibility (based on established research)
+    #   2. Zodiac compatibility (holistic, not mechanical)
+    #   3. Personality (extrovert/introvert/etc.) and interests in the bio
+    #  Missing-info penalty: each missing key field (MBTI or zodiac) reduces
+    #  available context; deduct 5-10 points accordingly. Users with more
+    #  complete profiles should rank higher when other factors are similar.
+    #  If anything is missing, mention it in the reason field.
+    #  Score brackets:
+    #   - 85+   : highly complementary + complete info + shared interests
+    #   - 65-85 : broadly compatible
+    #   - 50-65 : average, no major conflicts or alignments
+    #   - 30-50 : clear conflict, or severely incomplete info
+    #   - <30   : severe conflict
+    #  Use the full 0-100 range.
+    #  Output JSON: {'score': 72, 'reason': 'one sentence; mention missing info'}"
     prompt = f"""你是留学生舍友匹配专家，熟悉权威的MBTI兼容性研究和星座性格分析。
 请综合评估以下两位同学的性格与兴趣爱好契合程度。
 
@@ -338,9 +393,10 @@ B的性格兴趣：
 
 
 # ══════════════════════════════════════════════════════════
-# 技能标签（不参与评分）
+# Skills label (display only, not scored)
 # ══════════════════════════════════════════════════════════
 def compute_skills_label(me: UserProfile, other: UserProfile) -> str | None:
+    """Return "相同" (Same) / "互补" (Complementary) / None"""
     my_skills  = set(s.strip().lower() for s in str_to_list(me.special_skills  or ""))
     oth_skills = set(s.strip().lower() for s in str_to_list(other.special_skills or ""))
     if not my_skills and not oth_skills:
@@ -349,7 +405,7 @@ def compute_skills_label(me: UserProfile, other: UserProfile) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════
-# 权重计算 + 总分
+# Weight resolution + total score
 # ══════════════════════════════════════════════════════════
 def resolve_weights(
     objective_score:   float | None,
@@ -357,6 +413,11 @@ def resolve_weights(
     personality_score: float | None,
     custom_weights:    dict | None = None,
 ) -> dict[str, float]:
+    """Compute final weights.
+
+    If a dimension has no data (None), it gets MIN_WEIGHT (5%) and the
+    remaining weight is redistributed proportionally among present dimensions.
+    """
     base = custom_weights if custom_weights else dict(DEFAULT_WEIGHTS)
     missing = []
     if objective_score   is None: missing.append("objective")
@@ -383,6 +444,7 @@ def compute_total_score(
     personality_score: float | None,
     custom_weights:    dict | None = None,
 ) -> tuple[float, dict[str, float]]:
+    """Return (total 0-100, weights actually used)."""
     w = resolve_weights(objective_score, habits_score, personality_score, custom_weights)
     o = objective_score   if objective_score   is not None else 50.0
     h = habits_score      if habits_score      is not None else 50.0
