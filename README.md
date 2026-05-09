@@ -113,18 +113,33 @@ I ran self-validation across the seven users currently registered on the platfor
 - **Self-as-target test:** When matching against a profile identical to mine, the system ranked it #1 out of 7 — confirming the scoring correctly identifies near-perfect matches.
 - **Real roommate test:** When matching against my actual current roommate's profile, the system ranked them #3 out of 7 — confirming that someone I genuinely live with well does score in the top tier even though we differ on several factors (different majors, different MBTI).
 
+1. with AI:
+   (1) Matching score and reason:
+<img width="474" height="835" alt="image" src="https://github.com/user-attachments/assets/0c12550f-64fd-4779-b80f-9b0086477f03" />
+   (2) Overall matching scores:
+   <img width="490" height="701" alt="image" src="https://github.com/user-attachments/assets/87eaf3a1-c7b9-4470-82f7-7b28dbd72d33" />
+2. without AI:
+   (1) Matching score and reason:
+   <img width="945" height="775" alt="image" src="https://github.com/user-attachments/assets/12b229f0-84d3-4cec-9e4d-d95bdd1e7a2c" />
+   -- The reasoning and matching score is still there, but lacks sepecific details and hobby analysis.
+
+   (2) Overall matching scores:
+   <img width="543" height="714" alt="image" src="https://github.com/user-attachments/assets/4a379566-c3c6-4af8-8e4f-2091c55887e0" />
+   -- We can see that the ranking is different, user profiles with less information are gaining more matching points.
+
 ### Findings
 
 - **Score distribution is well-spread**, not clustered around the middle, after lowering Qwen's `temperature` to 0.2 and adding explicit instructions in each prompt to use the full 0–100 range.
 - **AI dimension reasoning is human-readable** — the per-dimension explanations (e.g., "📍 Objective: same study country, but different cities") make matches feel transparent, not like a black box.
 - **Multilingual search works end-to-end** — tested with Chinese, English, Japanese, and Korean search queries against Chinese-stored profile data, all return correct filtered results.
 - **Cache hit rate is high in practice** — once a user's matches are computed, repeat visits are instant unless someone's profile changed.
-
+- 
 ### Known limitations
 
 - The user base is small, so real-world matching diversity is limited. Most evaluation is structural rather than empirical.
 - The keyword-only baseline comparison still needs more rigorous head-to-head test cases.
 - AI scoring and searching is slow, I'm doing cache for the first issue but still not have fixed the second.
+- Matching reason and score generation also works without AI, it's just that with AI api, the reasoning is more detailed, thourough and clear, sometimes is fun, and the score can be more accurate since the profile is considerated by qwen-plus, but for baseline mode, profile is not quite "useful" so that baseline mode may lack much information.
 
 ---
 
