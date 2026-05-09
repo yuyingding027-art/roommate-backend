@@ -20,11 +20,11 @@ LANG_NAMES = {
     "ko": "한국어",
 }
 
-# 语言检测关键词（粗略判断，够用）
+# Lightweight language detection (rough but sufficient)
 def detect_lang(text: str) -> str:
     if not text:
         return "zh"
-    # 统计各语系字符占比
+    # Count character ratios across language families
     zh_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
     ja_count = sum(1 for c in text if '\u3040' <= c <= '\u30ff')
     ko_count = sum(1 for c in text if '\uac00' <= c <= '\ud7a3')
@@ -41,16 +41,25 @@ def detect_lang(text: str) -> str:
 
 
 def _translate_with_qwen(text: str, target_lang: str) -> str:
-    """同步调用 Qwen 翻译，保留原意，不翻译专有名词"""
+    """Synchronously call Qwen for translation; preserve meaning, do not translate proper nouns."""
     if not text or not text.strip():
         return text
 
-    # BASELINE MODE: 不翻译，原文返回
+    # BASELINE MODE: skip translation, return original text
     import os
     if os.getenv("BASELINE_MODE", "false").lower() == "true":
         return text
 
     lang_name = LANG_NAMES.get(target_lang, "English")
+    # System prompt — kept in Chinese.
+    # English translation:
+    # "Translate the following text to {lang_name}.
+    #  Rules:
+    #  1. Output only the translation; no explanation or prefix
+    #  2. Keep proper nouns (people names, school names, cities, brands) untranslated
+    #  3. Preserve emojis and punctuation
+    #  4. Match the tone and style of the original
+    #  Source: {text}"
     prompt = (
         f"请将以下文本翻译成{lang_name}。\n"
         "规则：\n"
@@ -69,8 +78,8 @@ def _translate_with_qwen(text: str, target_lang: str) -> str:
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"❌ 翻译失败: {e}")
-        return text  # 失败返回原文
+        print(f"❌ Translation failed: {e}")
+        return text  # return original on failure
 
 
 class TranslateRequest(BaseModel):
@@ -80,16 +89,16 @@ class TranslateRequest(BaseModel):
 
 class TranslateResponse(BaseModel):
     translated: dict[str, str]
-    skipped: list[str]       # 与目标语言相同、跳过翻译的字段
+    skipped: list[str]       # fields skipped (same language as target)
 
 
 @router.post("/", response_model=TranslateResponse)
 async def translate_texts(body: TranslateRequest):
     """
-    批量翻译文本字段。
-    - 检测每个字段的语言，与目标语言相同则跳过
-    - 不同则调用 Qwen 翻译
-    - 返回翻译结果 + 跳过的字段列表
+    Batch-translate text fields.
+    - For each field, detect language; skip if it matches the target language.
+    - Otherwise call Qwen for translation.
+    - Returns the translated map + a list of skipped field keys.
     """
     if body.target_lang not in LANG_NAMES:
         raise HTTPException(status_code=400, detail=f"不支持的语言: {body.target_lang}")
