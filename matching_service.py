@@ -169,7 +169,7 @@ async def compute_objective_score(
 
     # ── bio 客观共同点 最高+5（轻量AI）──────────────────
     bio_score = 0
-    if me.bio and other.bio:
+    if me.bio and other.bio and not BASELINE_MODE:
         bio_prompt = (
             "你是一个信息提取助手。请对比以下两段个人介绍，"
             "找出客观信息上的共同点（仅限：老家同城市、老家同省份、"
