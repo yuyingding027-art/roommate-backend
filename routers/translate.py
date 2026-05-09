@@ -44,6 +44,12 @@ def _translate_with_qwen(text: str, target_lang: str) -> str:
     """同步调用 Qwen 翻译，保留原意，不翻译专有名词"""
     if not text or not text.strip():
         return text
+
+    # BASELINE MODE: 不翻译，原文返回
+    import os
+    if os.getenv("BASELINE_MODE", "false").lower() == "true":
+        return text
+
     lang_name = LANG_NAMES.get(target_lang, "English")
     prompt = (
         f"请将以下文本翻译成{lang_name}。\n"
