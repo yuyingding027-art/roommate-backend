@@ -11,10 +11,10 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="留学生找舍友平台 API",
+    title="留学生找舍友平台 API", # eng: roommate seeking platform for international students
     version="1.0.0",
     lifespan=lifespan,
-    redirect_slashes=False,   # ← 加这一行
+    redirect_slashes=False,   # ← add this
 )
 
 app.add_middleware(
@@ -35,7 +35,7 @@ app.include_router(roommates.router,  prefix="/api/roommates",  tags=["锁定舍
 
 @app.get("/")
 async def root():
-    return {"message": "留学生找舍友平台 API 运行中"}
+    return {"message": "留学生找舍友平台 API 运行中"} #API working
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
