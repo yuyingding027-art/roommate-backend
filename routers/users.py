@@ -40,7 +40,7 @@ async def create_or_update_profile(
     data["room_types"]     = list_to_str(data.get("room_types") or [])
 
     if profile:
-        # profile 有变化时递增版本号，触发匹配分数缓存失效
+        # profile version+1
         current_version = getattr(profile, "profile_version", 1) or 1
         data["profile_version"] = current_version + 1
         for k, v in data.items():
@@ -82,16 +82,16 @@ async def get_user_profile(user_id: str, db: AsyncSession = Depends(get_db)):
     return profile_to_dict(profile, email=user.email if user else None)
 
 
-# ── 撤销 / 恢复可查询档案 ──────────────────────────────────────────────────────
+# ── revoke/recover profile ──────────────────────────────────────────────────────
 @router.post("/profile/searchable")
 async def toggle_searchable(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    切换当前用户的档案可查询状态。
-    撤销：is_searchable=False，匹配搜索中不再出现
-    恢复：is_searchable=True，重新出现在搜索中
+    切换当前用户的档案可查询状态。toggle the current user's profile searchability
+    撤销：is_searchable=False，匹配搜索中不再出现 revoke, no show in matching page
+    恢复：is_searchable=True，重新出现在搜索中 recover, showcases in matching page
     返回新状态。
     """
     result = await db.execute(
