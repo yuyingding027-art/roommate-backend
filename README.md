@@ -1,3 +1,4 @@
+### Author: Yuying Ding (yuyingding027-art)
 # Univoroomi
 
 A roommate matching platform for international students that is safer due to education email verification, hige-efficient due to roommate-info concentration, accurate due to keywords matching on basic information and AI analysis on personality, hobby, MBTI and zodiac matching, and fun. Live at **[univoroomi.com](https://univoroomi.com)**.
