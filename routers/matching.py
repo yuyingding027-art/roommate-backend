@@ -24,17 +24,17 @@ def str_to_list(s: str) -> list:
 
 
 # ══════════════════════════════════════════════════════════
-# AI 搜索词解析
+# AI-based search query parsing
 # ══════════════════════════════════════════════════════════
 async def parse_search_with_ai(search_query: str) -> dict:
-    """让 Qwen 把任意语言的搜索词转成结构化筛选条件"""
+    """Use Qwen to parse a multilingual search query into structured filters."""
     if not search_query or not search_query.strip():
         return {}
 
-    # BASELINE MODE: 跳过 AI，做简单关键词匹配
+    # BASELINE MODE: skip AI with filter
     import os
     if os.getenv("BASELINE_MODE", "false").lower() == "true":
-        # 用最简单的关键词包含判断
+        # Simplest possible substring matching
         q = search_query.lower()
         result = {}
         if any(w in q for w in ["female", "女", "女生", "女性"]):
@@ -52,7 +52,24 @@ async def parse_search_with_ai(search_query: str) -> dict:
         if "no_smoking" in q or "不抽烟" in q or "不吸烟" in q or "non-smoker" in q:
             result["habits_required"] = ["no_smoking"]
         return result
-
+ # System prompt — kept in Chinese.
+    # English translation:
+    # "The user typed a roommate search query: \"{search_query}\".
+    #  Parse it (may be in Chinese, English, Japanese, or Korean) and extract
+    #  the filter conditions below. If a field isn't mentioned, return null
+    #  or an empty array.
+    #  Fields:
+    #   - gender: 'male' | 'female' | null
+    #   - sleep_habit: 'early' | 'late' | 'flexible' | null
+    #   - diet_habit: 'together' (eat together) | 'separate' | 'flexible' | null
+    #   - habits_required: zero or more from
+    #       ['smoking','no_smoking','pet','no_pet','clean_high','clean_mid','clean_low']
+    #   - skills_keywords: list of skill keywords (lowercase English)
+    #   - soft_query: any portion that cannot be structured (preserve original text)
+    #  Examples:
+    #   - 'eat together' → {'diet_habit':'together', ...}
+    #   - 'non-smoker female night owl' → {'gender':'female','sleep_habit':'late','habits_required':['no_smoking'], ...}
+    #  Output JSON only, nothing else."
     prompt = f"""用户输入了舍友搜索词："{search_query}"
 
 请分析这段搜索词（可能是中文、英文、日语或韩语），提取出以下字段的筛选条件。
@@ -80,7 +97,7 @@ async def parse_search_with_ai(search_query: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════
-# 多语言值标准化对照表（关键 ★）
+# Multilingual synonym tables for normalizing stored values (★ key piece)
 # ══════════════════════════════════════════════════════════
 DIET_SYNONYMS = {
     "together": [
@@ -199,7 +216,7 @@ def filter_by_search(all_profiles: list, filters: dict) -> list:
 
 
 # ══════════════════════════════════════════════════════════
-# 搜索框上方填空的严格筛选
+# Strict structured filters from the form above the search bar
 # ══════════════════════════════════════════════════════════
 def hard_filter_profiles(
     all_profiles: list,
@@ -242,7 +259,7 @@ def hard_filter_profiles(
 
 
 # ══════════════════════════════════════════════════════════
-# 主路由
+# Main route
 # ══════════════════════════════════════════════════════════
 @router.get("/", response_model=List[MatchResult])
 async def get_matches(
@@ -329,7 +346,7 @@ async def get_matches(
     if has_filters or custom_weights or search_query:
         refresh = True
 
-    # 缓存
+    # cache
     cached_result = await db.execute(
         select(MatchScore).where(MatchScore.user_id == current_user.id)
     )
