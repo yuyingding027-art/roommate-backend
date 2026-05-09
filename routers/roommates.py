@@ -1,9 +1,9 @@
 """
-锁定舍友路由
-POST   /api/roommates/invite          发起锁定邀请（自动发送邀请消息到 chat）
-POST   /api/roommates/respond         回应邀请（同意/拒绝/考虑一下）
-GET    /api/roommates/locked          获取当前用户已锁定的舍友列表 + 数量
-GET    /api/roommates/pending         获取收到的待处理邀请
+Roommate Lock routes
+POST   /api/roommates/invite          Send a lock invitation (automatically posts an invite card into chat)
+POST   /api/roommates/respond         Respond to an invitation (accepted / rejected / considering)
+GET    /api/roommates/locked          List all roommates the current user has locked + total count
+GET    /api/roommates/pending         List pending invitations received by the current user
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +28,7 @@ async def _get_profile(db: AsyncSession, user_id) -> UserProfile | None:
 
 
 def _profile_to_meta(profile: UserProfile, email: str = None) -> dict:
-    """把 profile 序列化成邀请卡片用的 meta"""
+    """Serialize a profile into the meta dict embedded in an invite card."""
     def sl(s): return [x for x in s.split(",") if x] if s else []
     return {
         "name":               profile.name,
@@ -64,14 +64,14 @@ async def invite_roommate(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    发起锁定舍友邀请：
-    1. 创建 RoommateMatch 记录（status=pending）
-    2. 自动发送一条 message_type=roommate_invite 的消息到 chat
+    Send a roommate-lock invitation:
+    1. Create a RoommateMatch record (status=pending)
+    2. Automatically post a message with message_type=roommate_invite into chat
     """
     if body.receiver_id == current_user.id:
         raise HTTPException(status_code=400, detail="不能邀请自己")
 
-    # 检查是否已有进行中的邀请
+    # Check whether there is already an active invitation
     existing = await db.execute(
         select(RoommateMatch).where(
             or_(
@@ -90,7 +90,7 @@ async def invite_roommate(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="已存在进行中的邀请或已锁定")
 
-    # 创建锁定关系
+    # Create the lock relationship
     invite = RoommateMatch(
         requester_id=current_user.id,
         receiver_id=body.receiver_id,
@@ -98,14 +98,14 @@ async def invite_roommate(
     )
     db.add(invite)
 
-    # 获取当前用户 profile，打包进邀请卡片消息
+    # Fetch current user's profile and pack it into the invite card payload
     my_profile = await _get_profile(db, current_user.id)
     meta = {
         "invite_id": str(invite.id),
         "profile":   _profile_to_meta(my_profile, email=current_user.email) if my_profile else {},
     }
 
-    # 发送邀请消息到 chat
+    # Post the invite message into chat
     msg = Message(
         sender_id    = current_user.id,
         receiver_id  = body.receiver_id,
@@ -128,9 +128,9 @@ async def respond_to_invite(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    回应邀请：accepted / rejected / considering
-    - accepted：双方锁定数各+1，自动发送系统消息，询问是否撤销档案
-    - rejected / considering：发送对应回应消息
+    Respond to an invite: accepted / rejected / considering
+    - accepted: both users' locked-roommate count +1; system message asks each whether to hide their profile
+    - rejected / considering: send the corresponding response message
     """
     if body.response not in ("accepted", "rejected", "considering"):
         raise HTTPException(status_code=400, detail="无效的回应类型")
@@ -149,14 +149,14 @@ async def respond_to_invite(
     invite.status     = body.response
     invite.updated_at = datetime.utcnow()
 
-    # 状态文字映射
+    # Status → display text mapping (kept in Chinese for end users)
     status_text = {
         "accepted":    "同意了锁定舍友邀请 🎉",
         "rejected":    "拒绝了锁定舍友邀请",
         "considering": "正在考虑锁定舍友邀请...",
     }[body.response]
 
-    # 回应消息 → 发给 requester
+    # Response message → sent to the original requester
     resp_meta = {
         "invite_id": str(invite.id),
         "response":  body.response,
@@ -172,14 +172,14 @@ async def respond_to_invite(
     db.add(resp_msg)
 
     if body.response == "accepted":
-        # 发系统消息给双方，询问是否撤销档案
+        # Send a system prompt to both users asking whether to hide their profile
         for uid, other_uid in [
             (invite.requester_id, current_user.id),
             (current_user.id, invite.requester_id),
         ]:
             system_msg = Message(
                 sender_id    = uid,
-                receiver_id  = uid,  # 发给自己 = 系统提示
+                receiver_id  = uid,  # sender == receiver indicates a system prompt
                 content      = "你已成功锁定一位舍友！是否需要撤销可查询档案？（撤销后其他用户将无法在匹配中看到你）",
                 message_type = "system_archive_prompt",
                 message_meta = json.dumps({"invite_id": str(invite.id)}),
@@ -196,7 +196,7 @@ async def get_locked_roommates(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """获取当前用户已锁定的舍友（双向 accepted）"""
+    """List all roommates the current user has locked (status=accepted, either direction)."""
     result = await db.execute(
         select(RoommateMatch).where(
             or_(
@@ -215,7 +215,7 @@ async def get_locked_roommates(
         roommates.append(RoommateMatchInfo(
             id           = m.id,
             partner_id   = partner_id,
-            partner_name = profile.name if profile else "未知",
+            partner_name = profile.name if profile else "Unknown",
             partner_avatar = profile.avatar_url if profile else None,
             status       = m.status,
             created_at   = m.created_at,
@@ -229,7 +229,7 @@ async def get_pending_invites(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """获取收到的待处理邀请"""
+    """List pending invitations received by the current user."""
     result = await db.execute(
         select(RoommateMatch).where(
             RoommateMatch.receiver_id == current_user.id,
