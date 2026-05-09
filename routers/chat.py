@@ -14,6 +14,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production-min-3
 ALGORITHM = "HS256"
 
 # 内存中维护在线WebSocket连接 {user_id: WebSocket}
+# In-memory map of online websocket connection
 active_connections: Dict[str, WebSocket] = {}
 
 @router.post("/send", response_model=MessageResponse)
@@ -35,6 +36,7 @@ async def send_message(
     await db.refresh(msg)
 
     # 如果对方在线，通过WebSocket实时推送
+    # if the recipient's online, push the message via WebSocket
     target_ws = active_connections.get(str(body.receiver_id))
     if target_ws:
         try:
@@ -81,6 +83,7 @@ async def get_history(
     messages = result.scalars().all()
 
     # 标记已读
+    # noted as "read"
     for m in messages:
         if str(m.receiver_id) == str(current_user.id) and not m.is_read:
             m.is_read = True
@@ -108,6 +111,7 @@ async def get_conversations(
 ):
     """获取所有会话列表（最后一条消息预览）"""
     # 找到所有与我有过消息的用户
+    # search all users who had sent message with "me"
     sent = await db.execute(
         select(Message.receiver_id).where(Message.sender_id == current_user.id).distinct()
     )
@@ -122,6 +126,7 @@ async def get_conversations(
     conversations = []
     for pid in partner_ids:
         # 最后一条消息
+        # last message
         last_msg_result = await db.execute(
             select(Message).where(
                 or_(
@@ -135,6 +140,7 @@ async def get_conversations(
             continue
 
         # 未读数
+        # unread message amount
         unread_result = await db.execute(
             select(func.count(Message.id)).where(
                 Message.sender_id == pid,
@@ -144,7 +150,7 @@ async def get_conversations(
         )
         unread = unread_result.scalar() or 0
 
-        # 对方profile
+        # the other user's profile
         profile_result = await db.execute(select(UserProfile).where(UserProfile.user_id == pid))
         partner_profile = profile_result.scalar_one_or_none()
 
