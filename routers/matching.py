@@ -31,6 +31,28 @@ async def parse_search_with_ai(search_query: str) -> dict:
     if not search_query or not search_query.strip():
         return {}
 
+    # BASELINE MODE: 跳过 AI，做简单关键词匹配
+    import os
+    if os.getenv("BASELINE_MODE", "false").lower() == "true":
+        # 用最简单的关键词包含判断
+        q = search_query.lower()
+        result = {}
+        if any(w in q for w in ["female", "女", "女生", "女性"]):
+            result["gender"] = "female"
+        elif any(w in q for w in ["male", "男", "男生", "男性"]):
+            result["gender"] = "male"
+        if any(w in q for w in ["early", "早睡", "早起"]):
+            result["sleep_habit"] = "early"
+        elif any(w in q for w in ["late", "night owl", "晚睡", "夜猫"]):
+            result["sleep_habit"] = "late"
+        if any(w in q for w in ["together", "一起", "一緒"]):
+            result["diet_habit"] = "together"
+        elif any(w in q for w in ["separate", "各自", "分开", "別々"]):
+            result["diet_habit"] = "separate"
+        if "no_smoking" in q or "不抽烟" in q or "不吸烟" in q or "non-smoker" in q:
+            result["habits_required"] = ["no_smoking"]
+        return result
+
     prompt = f"""用户输入了舍友搜索词："{search_query}"
 
 请分析这段搜索词（可能是中文、英文、日语或韩语），提取出以下字段的筛选条件。
