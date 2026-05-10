@@ -9,9 +9,9 @@ Changelog:
   4. (Frontend) Diet habit tag display + expanded card no longer overflows screen
 
 Default weights:
-  objective_score       Objective info       30%
-  habits_score          Lifestyle habits     40%
-  personality_score     Personality+interests 30%
+  objective_score        30%
+  habits_score           40%
+  personality_score      30%
 ══════════════════════════════════════════════════════════
 """
 
